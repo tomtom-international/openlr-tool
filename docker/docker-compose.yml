@@ -1,0 +1,141 @@
+services:
+  postgres:
+    image: kartoza/postgis:16-3.4
+    container_name: openlr-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: openlr_db
+      POSTGRES_USER: openlr
+      POSTGRES_PASS: openlrpwd
+      DEFAULT_ENCODING: UTF8
+      DEFAULT_COLLATION: en_US.UTF-8
+      EXTRA_CONF: |
+        max_connections=200
+        shared_buffers=4GB
+        effective_cache_size=12GB
+        maintenance_work_mem=2GB
+        checkpoint_completion_target=0.9
+        wal_buffers=64MB
+        default_statistics_target=100
+        random_page_cost=1.1
+        effective_io_concurrency=200
+        work_mem=128MB
+        huge_pages=off
+        min_wal_size=4GB
+        max_wal_size=16GB
+        max_worker_processes=8
+        max_parallel_workers_per_gather=4
+        max_parallel_workers=8
+        max_parallel_maintenance_workers=4
+        autovacuum_max_workers=2
+        autovacuum_naptime=60s
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    networks:
+      - openlr_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U openlr -d openlr_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    shm_size: 8gb
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: openlr-tool:latest
+    container_name: openlr-tool
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8081}:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: generic_pg_mapdb
+      SPRING_CONFIG_LOCATION: file:/app/config/application.properties
+      JAVA_OPTS: ${JAVA_OPTS:--Xmx24g}
+    volumes:
+      - ../config:/app/config:ro
+    networks:
+      - openlr_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # test: ["CMD", "curl", "-f", "http://localhost:8081/api/v1/purgeCache"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "-X",
+          "POST",
+          "http://localhost:8081/api/v1/cache/clear",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+
+  webapp:
+    build:
+      context: ../webapp
+      dockerfile: Dockerfile
+    image: openlr-webapp:latest
+    container_name: openlr-webapp
+    restart: unless-stopped
+    ports:
+      - "${WEBAPP_PORT:-3000}:3000"
+    environment:
+      WEBAPP_PORT: 3000
+      API_URL: http://app:8081
+    networks:
+      - openlr_network
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  db-setup:
+    build:
+      context: ./db-setup
+      dockerfile: Dockerfile
+    image: openlr-db-setup:latest
+    container_name: openlr-db-setup
+    profiles: ["setup"]
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+    networks:
+      - openlr_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: openlr_db
+      PGUSER: openlr
+      PGPASSWORD: openlrpwd
+
+volumes:
+  postgres_data:
+    name: openlr_postgres_data
+
+networks:
+  openlr_network:
+    name: openlr_network
+    driver: bridge

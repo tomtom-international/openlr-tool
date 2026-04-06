@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: openlr-tool
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:openlr_db}
+    username: ${DB_USER:openlr}
+    password: ${DB_PASSWORD:openlrpwd}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:20}
+      minimum-idle: ${DB_POOL_MIN:5}
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+server:
+  port: ${PORT:8080}
+  error:
+    include-message: always
+    include-stacktrace: on_param
+
+logging:
+  level:
+    root: INFO
+    com.tomtom.openlr.webtool: ${LOG_LEVEL:DEBUG}
+    org.springframework.web: WARN
+    org.springframework.jdbc: ${DB_LOG_LEVEL:INFO}
+
+openlr:
+  database:
+    schema: ${DB_SCHEMA:local}
+    roads-table: ${DB_ROADS_TABLE:roads}
+    intersections-table: ${DB_INTERSECTIONS_TABLE:intersections}
+
+  cache:
+    line-cache-size: ${LINE_CACHE_SIZE:100000}
+    node-cache-size: ${NODE_CACHE_SIZE:100000}
+    close-lines-cache-size: ${CLOSE_LINES_CACHE_SIZE:10000}
+
+  decoder:
+    properties-dir: ${DECODER_PROPS_DIR:classpath:openlr/decoder}
+
+  encoder:
+    properties-dir: ${ENCODER_PROPS_DIR:classpath:openlr/encoder}

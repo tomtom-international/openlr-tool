@@ -1,0 +1,528 @@
+openapi: 3.0.0
+info:
+  title: OpenLR WebTool API
+  description: |
+    REST API for OpenLR (Open Location Reference) encoding and decoding operations.
+
+    The OpenLR WebTool provides endpoints for:
+    - Decoding OpenLR binary codes to geographic paths
+    - Encoding geographic paths to OpenLR binary codes
+    - Map database management and caching
+    - System administration and monitoring
+
+    ## Supported Map Database Types
+    - **SQLite/SpatiaLite**: Spatial database support with custom schemas
+    - **PostgreSQL**: Production-scale relational database support
+
+  version: 1.0.0
+  contact:
+    name: OpenLR WebTool Maintainers
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: http://localhost:8081/api/v1
+    description: Local development server
+  - url: http://localhost:8082/api/v1
+    description: Alternative local server
+
+paths:
+  /purgeCache:
+    get:
+      summary: Clear all caches
+      description: |
+        Clears all internal caches including:
+        - Map data caches
+        - Line geometry caches
+        - Node connection caches
+        - Spatial query result caches
+      operationId: purgeCache
+      responses:
+        '200':
+          description: Caches cleared successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                status: "success"
+                message: "All caches purged successfully"
+                timestamp: "2024-03-15T10:30:00Z"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /reloadProps:
+    get:
+      summary: Reload property files
+      description: |
+        Reloads OpenLR encoding and decoding property files without restarting the application.
+        Useful for updating configuration parameters during development.
+      operationId: reloadProperties
+      responses:
+        '200':
+          description: Properties reloaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+              example:
+                status: "success"
+                message: "Properties reloaded successfully"
+                timestamp: "2024-03-15T10:30:00Z"
+        '500':
+          description: Property reload failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /getLine:
+    get:
+      summary: Get line geometry by key
+      description: |
+        Retrieves detailed information about a specific line/road segment including:
+        - Geometric coordinates (WKT format)
+        - Road classification (FRC - Functional Road Class)
+        - Form of Way (FOW)
+        - Start and end node information
+      operationId: getLine
+      parameters:
+        - name: key
+          in: query
+          required: true
+          description: Unique identifier for the line in the map database
+          schema:
+            type: string
+          example: "12345"
+      responses:
+        '200':
+          description: Line information retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LineResponse'
+        '404':
+          description: Line not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: "error"
+                message: "Line with key '12345' not found"
+                timestamp: "2024-03-15T10:30:00Z"
+        '400':
+          description: Invalid line key format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /decode:
+    post:
+      summary: Decode OpenLR binary
+      description: |
+        Decodes an OpenLR binary string to geographic coordinates and path information.
+
+        ## OpenLR Binary Format
+        OpenLR uses a compact binary format to represent location references that can be
+        decoded against any compatible map database. The binary format includes:
+        - Location Reference Points (LRPs)
+        - Functional Road Class (FRC) and Form of Way (FOW) attributes
+        - Distance and bearing information
+
+        ## Decoding Process
+        1. Parse binary OpenLR string
+        2. Find candidate lines near each Location Reference Point
+        3. Calculate shortest path between points
+        4. Apply coordinate offset adjustments
+        5. Return decoded path with metadata
+      operationId: decodeOpenLR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecodeRequest'
+            example:
+              openLRString: "CwQ7jCM1XQo0CP7l/oQKAQ=="
+              properties: "default"
+      responses:
+        '200':
+          description: OpenLR decoded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecodeResponse'
+        '400':
+          description: Invalid OpenLR format or decoding parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: "error"
+                message: "Invalid OpenLR binary format"
+                details: "Unable to parse binary string: CwQ7jCM1XQo0CP7l/oQKAQ=="
+                timestamp: "2024-03-15T10:30:00Z"
+        '422':
+          description: OpenLR could not be decoded against current map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecodeResponse'
+              example:
+                status: "failed"
+                errorCode: "NO_ROUTE_FOUND"
+                message: "Unable to find valid route between location reference points"
+                timestamp: "2024-03-15T10:30:00Z"
+
+  /encode:
+    post:
+      summary: Encode path to OpenLR
+      description: |
+        Encodes a geographic path (sequence of coordinates) into an OpenLR binary string.
+
+        ## Encoding Process
+        1. Map input coordinates to road network
+        2. Find optimal Location Reference Points (LRPs)
+        3. Calculate distances and bearings between LRPs
+        4. Generate compact binary OpenLR representation
+
+        ## Input Formats
+        - **Coordinate Array**: Simple lat/lon coordinate pairs
+        - **GeoJSON LineString**: Standard GeoJSON format
+        - **WKT LineString**: Well-Known Text geometric representation
+      operationId: encodeOpenLR
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EncodeRequest'
+            examples:
+              coordinates:
+                summary: Coordinate array format
+                value:
+                  path:
+                    - [6.12959, 49.61181]
+                    - [6.12965, 49.61185]
+                    - [6.12971, 49.61189]
+                  properties: "default"
+              geojson:
+                summary: GeoJSON LineString format
+                value:
+                  path:
+                    type: "LineString"
+                    coordinates: [[6.12959, 49.61181], [6.12965, 49.61185], [6.12971, 49.61189]]
+                  properties: "default"
+      responses:
+        '200':
+          description: Path encoded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EncodeResponse'
+        '400':
+          description: Invalid path format or encoding parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Path could not be encoded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EncodeResponse'
+              example:
+                status: "failed"
+                errorCode: "INSUFFICIENT_LRPS"
+                message: "Path too short to generate meaningful Location Reference Points"
+                timestamp: "2024-03-15T10:30:00Z"
+
+components:
+  schemas:
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+          description: Operation status
+        message:
+          type: string
+          description: Human-readable status message
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of response
+      required:
+        - status
+        - message
+        - timestamp
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [error]
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: string
+          description: Technical details about the error
+        timestamp:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp of response
+      required:
+        - status
+        - message
+        - timestamp
+
+    LineResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, error]
+        line:
+          $ref: '#/components/schemas/LineInfo'
+        timestamp:
+          type: string
+          format: date-time
+      required:
+        - status
+        - timestamp
+
+    LineInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique line identifier
+        geometry:
+          type: string
+          description: Line geometry in WKT format
+        frc:
+          type: integer
+          minimum: 0
+          maximum: 7
+          description: Functional Road Class (0=motorway, 7=other)
+        fow:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: Form of Way (0=undefined, 1=motorway, 2=multi-carriageway, 3=single-carriageway, 4=roundabout)
+        length:
+          type: number
+          format: double
+          description: Line length in meters
+        startNode:
+          $ref: '#/components/schemas/NodeInfo'
+        endNode:
+          $ref: '#/components/schemas/NodeInfo'
+        metadata:
+          type: string
+          description: Additional line metadata
+      required:
+        - id
+        - geometry
+        - frc
+        - fow
+        - length
+
+    NodeInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique node identifier
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          description: Node longitude in WGS84 decimal degrees
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          description: Node latitude in WGS84 decimal degrees
+      required:
+        - id
+        - longitude
+        - latitude
+
+    DecodeRequest:
+      type: object
+      properties:
+        openLRString:
+          type: string
+          description: Base64-encoded OpenLR binary string
+          example: "CwQ7jCM1XQo0CP7l/oQKAQ=="
+        properties:
+          type: string
+          description: Decoding properties profile to use
+          enum: [default, strict, relaxed]
+          default: default
+      required:
+        - openLRString
+
+    DecodeResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, failed, error]
+        openLRString:
+          type: string
+          description: Original OpenLR string that was decoded
+        result:
+          $ref: '#/components/schemas/DecodedLocation'
+        errorCode:
+          type: string
+          description: Error code if decoding failed
+        message:
+          type: string
+          description: Human-readable result message
+        timestamp:
+          type: string
+          format: date-time
+      required:
+        - status
+        - timestamp
+
+    DecodedLocation:
+      type: object
+      properties:
+        path:
+          type: array
+          items:
+            $ref: '#/components/schemas/PathPoint'
+          description: Decoded path as sequence of coordinates
+        lines:
+          type: array
+          items:
+            type: string
+          description: Database line IDs comprising the decoded path
+        metadata:
+          $ref: '#/components/schemas/LocationMetadata'
+        geoJson:
+          type: object
+          description: Decoded location as GeoJSON feature
+      required:
+        - path
+
+    EncodeRequest:
+      type: object
+      properties:
+        path:
+          oneOf:
+            - type: array
+              items:
+                type: array
+                items:
+                  type: number
+                  format: double
+                minItems: 2
+                maxItems: 2
+              description: Array of [longitude, latitude] coordinate pairs
+            - type: object
+              description: GeoJSON LineString geometry
+        properties:
+          type: string
+          description: Encoding properties profile to use
+          enum: [default]
+          default: default
+      required:
+        - path
+
+    EncodeResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, failed, error]
+        openLRString:
+          type: string
+          description: Generated OpenLR binary string (Base64 encoded)
+        path:
+          type: array
+          items:
+            $ref: '#/components/schemas/PathPoint'
+          description: Original input path normalized
+        errorCode:
+          type: string
+          description: Error code if encoding failed
+        message:
+          type: string
+          description: Human-readable result message
+        timestamp:
+          type: string
+          format: date-time
+      required:
+        - status
+        - timestamp
+
+    PathPoint:
+      type: object
+      properties:
+        longitude:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+          description: Longitude in WGS84 decimal degrees
+        latitude:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+          description: Latitude in WGS84 decimal degrees
+      required:
+        - longitude
+        - latitude
+
+    LocationMetadata:
+      type: object
+      properties:
+        totalLength:
+          type: number
+          format: double
+          description: Total path length in meters
+        boundingBox:
+          type: array
+          items:
+            type: number
+            format: double
+          minItems: 4
+          maxItems: 4
+          description: Bounding box as [minLon, minLat, maxLon, maxLat]
+        administrativeArea:
+          type: string
+          description: Administrative area containing the location
+        mapDatabase:
+          type: string
+          description: Map database type used for decoding
+        decodingProperties:
+          type: string
+          description: Decoding properties profile used
+
+tags:
+  - name: Cache Management
+    description: Operations for managing internal caches
+  - name: Configuration
+    description: Runtime configuration management
+  - name: Map Data
+    description: Direct access to map database content
+  - name: OpenLR Operations
+    description: Core OpenLR encoding and decoding functionality

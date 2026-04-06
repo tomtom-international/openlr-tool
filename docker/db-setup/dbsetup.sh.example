@@ -1,0 +1,133 @@
+#!/bin/bash
+set -e
+
+# Example Database Setup Script for OpenLR WebTool
+#
+# This script demonstrates how to load map data into PostgreSQL using:
+#   - psql     : PostgreSQL command-line client
+#   - ogr2ogr  : GDAL spatial data conversion tool
+#
+# Environment variables are pre-configured:
+#   PGHOST=postgres
+#   PGPORT=5432
+#   PGDATABASE=openlr_db
+#   PGUSER=openlr
+#   PGPASSWORD=openlrpwd
+#
+# Usage:
+#   1. Copy this file to your data directory as "dbsetup.sh"
+#   2. Modify it for your specific data
+#   3. Run: ./dc setup /path/to/your/data
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Loading Map Data into OpenLR WebTool Database"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Example 1: Create schema and tables using SQL file
+echo "Creating database schema..."
+psql <<EOF
+CREATE SCHEMA IF NOT EXISTS local;
+
+-- Roads table
+CREATE TABLE IF NOT EXISTS local.roads (
+    id BIGSERIAL PRIMARY KEY,
+    meta TEXT,
+    frc VARCHAR(10) NOT NULL,
+    fow VARCHAR(20) NOT NULL,
+    length_meters DOUBLE PRECISION NOT NULL,
+    flow_direction VARCHAR(20) NOT NULL,
+    start_node_id BIGINT NOT NULL,
+    end_node_id BIGINT NOT NULL,
+    geom GEOMETRY(LineString, 4326) NOT NULL
+);
+
+-- Intersections table
+CREATE TABLE IF NOT EXISTS local.intersections (
+    id BIGSERIAL PRIMARY KEY,
+    longitude DOUBLE PRECISION NOT NULL,
+    latitude DOUBLE PRECISION NOT NULL,
+    geom GEOMETRY(Point, 4326) NOT NULL
+);
+
+-- Create spatial indexes
+CREATE INDEX IF NOT EXISTS idx_roads_geom ON local.roads USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_roads_start_node ON local.roads (start_node_id);
+CREATE INDEX IF NOT EXISTS idx_roads_end_node ON local.roads (end_node_id);
+CREATE INDEX IF NOT EXISTS idx_intersections_geom ON local.intersections USING GIST (geom);
+
+GRANT ALL ON SCHEMA local TO openlr;
+GRANT ALL ON ALL TABLES IN SCHEMA local TO openlr;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA local TO openlr;
+EOF
+
+echo "✅ Schema created"
+echo ""
+
+# Example 2: Load roads from Shapefile using ogr2ogr
+if [ -f "roads.shp" ]; then
+    echo "Loading roads from Shapefile..."
+    ogr2ogr \
+        -f PostgreSQL \
+        PG:"host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER password=$PGPASSWORD" \
+        roads.shp \
+        -nln local.roads \
+        -lco GEOMETRY_NAME=geom \
+        -lco SPATIAL_INDEX=GIST \
+        -lco FID=id \
+        -t_srs EPSG:4326 \
+        -overwrite
+    echo "✅ Roads loaded"
+    echo ""
+fi
+
+# Example 3: Load data from CSV file
+if [ -f "roads.csv" ]; then
+    echo "Loading roads from CSV..."
+    psql -c "\COPY local.roads(meta, frc, fow, length_meters, flow_direction, start_node_id, end_node_id, geom) FROM 'roads.csv' WITH (FORMAT csv, HEADER true)"
+    echo "✅ Roads loaded from CSV"
+    echo ""
+fi
+
+# Example 4: Load data from SQL dump
+if [ -f "roads.sql" ]; then
+    echo "Loading roads from SQL dump..."
+    psql -f roads.sql
+    echo "✅ Roads loaded from SQL"
+    echo ""
+fi
+
+# Example 5: Run custom SQL queries
+echo "Creating additional indexes..."
+psql <<EOF
+-- Add any custom indexes or optimizations
+CREATE INDEX IF NOT EXISTS idx_roads_frc ON local.roads (frc);
+CREATE INDEX IF NOT EXISTS idx_roads_fow ON local.roads (fow);
+ANALYZE local.roads;
+ANALYZE local.intersections;
+EOF
+
+echo "✅ Indexes created"
+echo ""
+
+# Display statistics
+echo "Database Statistics:"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+psql -c "SELECT
+    'Roads' as table_name,
+    COUNT(*) as row_count
+FROM local.roads
+UNION ALL
+SELECT
+    'Intersections' as table_name,
+    COUNT(*) as row_count
+FROM local.intersections;"
+
+echo ""
+echo "Sample roads:"
+psql -c "SELECT id, meta, frc, fow, length_meters FROM local.roads LIMIT 5;"
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "✅ Database setup complete!"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

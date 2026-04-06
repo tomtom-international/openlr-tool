@@ -1,0 +1,253 @@
+#!/bin/bash
+
+# OpenLR WebTool Docker Compose Management
+# Usage: ./docker/dc <command>
+
+COMMAND=$1
+SERVICE=$2
+
+# Detect which docker compose command is available
+get_docker_compose_cmd() {
+    if command -v docker-compose &> /dev/null; then
+        echo "docker-compose"
+    elif docker compose version &> /dev/null; then
+        echo "docker compose"
+    else
+        echo "❌ Error: Neither 'docker-compose' nor 'docker compose' is available" >&2
+        exit 1
+    fi
+}
+
+DOCKER_COMPOSE_CMD=$(get_docker_compose_cmd)
+
+# Change to docker directory where docker-compose.yml lives
+cd "$(dirname "$0")" || exit 1
+
+show_usage() {
+    echo "OpenLR WebTool Docker Compose Management"
+    echo ""
+    echo "Usage: $0 <command> [service|options]"
+    echo ""
+    echo "Commands:"
+    echo "  build [service]    - Build Docker images (all or specific service)"
+    echo "  up [service]       - Start all services or specific service"
+    echo "  down [service]     - Stop all services or specific service"
+    echo "  restart [service]  - Restart all services or specific service"
+    echo "  logs [service]     - View logs (all or specific service)"
+    echo "  ps                 - Show running containers"
+    echo "  exec <service>     - Execute command in service"
+    echo "  setup <data-dir>   - Run database setup from a directory"
+    echo "  clean              - Stop and remove all containers, networks, and volumes"
+    echo ""
+    echo "Services:"
+    echo "  postgres           - PostgreSQL + PostGIS database"
+    echo "  app                - OpenLR WebTool application"
+    echo "  webapp             - OpenLR Visualization web interface"
+    echo "  db-setup           - Database setup sidecar (profile: setup)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 build                         # Build all images (postgres + app + webapp + db-setup)"
+    echo "  $0 build app                     # Build only app image"
+    echo "  $0 build webapp                  # Build only webapp image"
+    echo "  $0 build db-setup                # Build only db-setup image"
+    echo "  $0 up                            # Start postgres, app, and webapp"
+    echo "  $0 logs app                      # View app logs"
+    echo "  $0 setup /path/to/data           # Load map data into database"
+    echo "  $0 exec postgres psql -U openlr -d openlr_db"
+    echo "  $0 down                          # Stop everything"
+    echo ""
+    echo "Database Setup:"
+    echo "  The 'setup' command loads data into PostgreSQL using your custom script."
+    echo "  Create a directory with:"
+    echo "    - dbsetup.sh (required)  - Your setup script"
+    echo "    - *.shp, *.sql, etc.     - Your data files"
+    echo ""
+    echo "  Your dbsetup.sh can use:"
+    echo "    - psql    - PostgreSQL client"
+    echo "    - ogr2ogr - GDAL spatial data tool"
+    echo ""
+    echo "  Environment variables are pre-configured:"
+    echo "    PGHOST=postgres, PGDATABASE=openlr_db, PGUSER=openlr, PGPASSWORD=openlrpwd"
+    echo ""
+    echo "Environment variables:"
+    echo "  PORT             - App port (default: 8081)"
+    echo "  POSTGRES_PORT    - PostgreSQL port (default: 5432)"
+    echo "  JAVA_OPTS        - JVM options (default: -Xmx24g)"
+    echo "  DATA_DIR         - Data directory for setup (overridden by setup command)"
+}
+
+case $COMMAND in
+    "build")
+        if [ -n "$SERVICE" ]; then
+            echo "🔨 Building service: $SERVICE"
+            $DOCKER_COMPOSE_CMD build "$SERVICE"
+        else
+            echo "🔨 Building all Docker images..."
+            $DOCKER_COMPOSE_CMD build app webapp db-setup
+        fi
+        echo "✅ Build complete"
+        ;;
+
+    "up")
+        if [ -n "$SERVICE" ]; then
+            echo "🚀 Starting service: $SERVICE"
+            $DOCKER_COMPOSE_CMD up -d "$SERVICE"
+        else
+            echo "🚀 Starting all services..."
+            $DOCKER_COMPOSE_CMD up -d
+        fi
+        echo "✅ Services started"
+        $DOCKER_COMPOSE_CMD ps
+        ;;
+
+    "down")
+        if [ -n "$SERVICE" ]; then
+            echo "🛑 Stopping service: $SERVICE"
+            $DOCKER_COMPOSE_CMD stop "$SERVICE"
+        else
+            echo "🛑 Stopping all services..."
+            $DOCKER_COMPOSE_CMD down
+        fi
+        echo "✅ Services stopped"
+        ;;
+
+    "restart")
+        if [ -n "$SERVICE" ]; then
+            echo "🔄 Restarting service: $SERVICE"
+            $DOCKER_COMPOSE_CMD restart "$SERVICE"
+        else
+            echo "🔄 Restarting all services..."
+            $DOCKER_COMPOSE_CMD restart
+        fi
+        echo "✅ Services restarted"
+        ;;
+
+    "logs")
+        if [ -n "$SERVICE" ]; then
+            echo "📋 Viewing logs for: $SERVICE"
+            $DOCKER_COMPOSE_CMD logs -f "$SERVICE"
+        else
+            echo "📋 Viewing logs for all services..."
+            $DOCKER_COMPOSE_CMD logs -f
+        fi
+        ;;
+
+    "ps"|"status")
+        echo "📊 Container Status:"
+        $DOCKER_COMPOSE_CMD ps
+        ;;
+
+    "exec")
+        if [ -z "$SERVICE" ]; then
+            echo "❌ Error: Service name required"
+            echo "Usage: $0 exec <service> <command>"
+            echo "Example: $0 exec postgres psql -U openlr -d openlr_db"
+            exit 1
+        fi
+        shift 2  # Remove 'exec' and service name from args
+        $DOCKER_COMPOSE_CMD exec "$SERVICE" "$@"
+        ;;
+
+    "setup")
+        DATA_DIR_ARG="$SERVICE"
+
+        if [ -z "$DATA_DIR_ARG" ]; then
+            echo "❌ Error: Data directory path required"
+            echo ""
+            echo "Usage: $0 setup <data-dir>"
+            echo ""
+            echo "Example:"
+            echo "  $0 setup /Users/dave/germany-map-data"
+            echo ""
+            echo "Your data directory must contain a 'dbsetup.sh' script."
+            exit 1
+        fi
+
+        # Convert to absolute path
+        if [[ "$DATA_DIR_ARG" != /* ]]; then
+            DATA_DIR_ARG="$(pwd)/$DATA_DIR_ARG"
+        fi
+
+        # Verify directory exists
+        if [ ! -d "$DATA_DIR_ARG" ]; then
+            echo "❌ Error: Directory not found: $DATA_DIR_ARG"
+            exit 1
+        fi
+
+        # Verify dbsetup.sh exists
+        if [ ! -f "$DATA_DIR_ARG/dbsetup.sh" ]; then
+            echo "❌ Error: No dbsetup.sh found in: $DATA_DIR_ARG"
+            echo ""
+            echo "Create a dbsetup.sh script in your data directory."
+            echo "Example:"
+            echo ""
+            echo "  #!/bin/bash"
+            echo "  set -e"
+            echo "  echo 'Loading map data...'"
+            echo "  psql -f schema.sql"
+            echo "  ogr2ogr -f PostgreSQL PG:\"host=\$PGHOST dbname=\$PGDATABASE\" roads.shp"
+            echo ""
+            exit 1
+        fi
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  OpenLR WebTool - Database Setup"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Data directory: $DATA_DIR_ARG"
+        echo "Setup script:   $DATA_DIR_ARG/dbsetup.sh"
+        echo ""
+
+        # Export DATA_DIR for docker-compose
+        export DATA_DIR="$DATA_DIR_ARG"
+
+        # Build the db-setup image if it doesn't exist
+        if ! docker image inspect openlr-db-setup:latest &> /dev/null; then
+            echo "Building db-setup image..."
+            $DOCKER_COMPOSE_CMD build db-setup
+            echo ""
+        fi
+
+        # Run the setup container
+        echo "Running database setup..."
+        $DOCKER_COMPOSE_CMD --profile setup run --rm db-setup
+
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -eq 0 ]; then
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "✅ Database setup completed successfully"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        else
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "❌ Database setup failed (exit code: $EXIT_CODE)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+        exit $EXIT_CODE
+        ;;
+
+    "clean")
+        echo "⚠️  WARNING: This will remove all containers, networks, and volumes!"
+        read -p "Are you sure? (yes/no): " confirm
+        if [ "$confirm" = "yes" ]; then
+            echo "🧹 Cleaning up..."
+            $DOCKER_COMPOSE_CMD down -v --remove-orphans
+            docker rmi openlr-webtool:latest 2>/dev/null || true
+            echo "✅ Cleanup complete"
+        else
+            echo "❌ Cleanup cancelled"
+        fi
+        ;;
+
+    "")
+        show_usage
+        ;;
+
+    *)
+        echo "❌ Unknown command: $COMMAND"
+        echo ""
+        show_usage
+        exit 1
+        ;;
+esac

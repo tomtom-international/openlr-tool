@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenLR Visualization Tool</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Control Panel -->
+        <div class="control-panel">
+            <div class="control-content">
+                <div class="input-group">
+                    <label for="openlr-code">OpenLR Code:</label>
+                    <input
+                        type="text"
+                        id="openlr-code"
+                        placeholder="e.g., CwV/mSIeQA4kBgFxAJ8OEA=="
+                        class="input-field"
+                    />
+                </div>
+
+                <div class="input-group">
+                    <label for="decoder-props">Parameter Set:</label>
+                    <select
+                        id="decoder-props"
+                        class="input-field"
+                    >
+                        <option value="default">default</option>
+                        <option value="strict">strict</option>
+                        <option value="relaxed">relaxed</option>
+                    </select>
+                </div>
+
+                <div class="button-group">
+                    <button id="decode-btn" class="btn btn-primary">Decode</button>
+                </div>
+
+                <div id="status-message" class="status-message"></div>
+            </div>
+        </div>
+
+        <!-- Main Content Area -->
+        <div class="main-content">
+            <!-- Sidebar Toggle Button (outside sidebar so always visible) -->
+            <button id="toggle-sidebar-btn" class="sidebar-toggle" style="display: none;">▶</button>
+
+            <!-- Sidebar Panel -->
+            <aside id="sidebar" class="sidebar">
+                <div class="sidebar-resize-handle"></div>
+                <div class="sidebar-content">
+
+                    <!-- Offset Information -->
+                    <div class="panel-section">
+                        <div class="section-header" data-section="offsets">
+                            <span class="expand-icon">▼</span>
+                            <h3>Offsets</h3>
+                        </div>
+                        <div class="section-content" id="offsets-section">
+                            <div class="info-row">
+                                <span class="info-label">Positive:</span>
+                                <span class="info-value" id="positive-offset-absolute">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Positive (%):</span>
+                                <span class="info-value" id="positive-offset-relative">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Negative:</span>
+                                <span class="info-value" id="negative-offset-absolute">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Negative (%):</span>
+                                <span class="info-value" id="negative-offset-relative">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Path Metadata -->
+                    <div class="panel-section">
+                        <div class="section-header" data-section="path">
+                            <span class="expand-icon">▼</span>
+                            <h3>Path Metadata</h3>
+                        </div>
+                        <div class="section-content" id="path-section">
+                            <div class="info-row">
+                                <span class="info-label">Path Length:</span>
+                                <span class="info-value" id="path-length">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Applied Positive:</span>
+                                <span class="info-value" id="applied-positive-offset">-</span>
+                            </div>
+                            <div class="info-row">
+                                <span class="info-label">Applied Negative:</span>
+                                <span class="info-value" id="applied-negative-offset">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- LRP Information -->
+                    <div class="panel-section">
+                        <div class="section-header collapsed" data-section="lrps">
+                            <span class="expand-icon">▼</span>
+                            <h3>Location Reference Points</h3>
+                        </div>
+                        <div class="section-content collapsed" id="lrps-section">
+                            <div class="table-wrapper">
+                                <table id="lrp-table" class="segments-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Type</th>
+                                            <th>Lat</th>
+                                            <th>Lon</th>
+                                            <th>Bearing</th>
+                                            <th>Dist</th>
+                                            <th>FRC</th>
+                                            <th>FOW</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="lrp-table-body">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Segments Table -->
+                    <div class="panel-section">
+                        <div class="section-header" data-section="segments">
+                            <span class="expand-icon">▼</span>
+                            <h3>Segments</h3>
+                        </div>
+                        <div class="section-content" id="segments-section">
+                            <div class="table-wrapper">
+                                <table id="segments-table" class="segments-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>Meta</th>
+                                            <th>FRC</th>
+                                            <th>FOW</th>
+                                            <th>Length</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="segments-table-body">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </aside>
+
+            <!-- Map Container -->
+            <div id="map" class="map-container"></div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Leaflet TextPath -->
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-textpath@1.2.3/leaflet.textpath.min.js"></script>
+
+    <!-- OpenLR JS Library -->
+    <script src="https://cdn.jsdelivr.net/npm/openlr-js@latest/lib/browser/bundle.js"></script>
+
+    <!-- Application JS -->
+    <script src="/js/app.js?v=24"></script>
+</body>
+</html>

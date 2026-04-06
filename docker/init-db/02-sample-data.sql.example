@@ -1,0 +1,21 @@
+-- Sample data loader (optional)
+-- Rename this file to 02-sample-data.sql to load sample data on initialization
+-- This is an example showing the data format expected by the OpenLR application
+
+-- Sample intersections (nodes)
+-- INSERT INTO local.intersections (id, meta, geom) VALUES
+--     (1, 'node_1', ST_SetSRID(ST_MakePoint(-0.1276, 51.5074), 4326)),  -- London
+--     (2, 'node_2', ST_SetSRID(ST_MakePoint(-0.1280, 51.5078), 4326)),
+--     (3, 'node_3', ST_SetSRID(ST_MakePoint(-0.1284, 51.5082), 4326));
+
+-- Sample roads (links)
+-- frc: Functional Road Class (0-7, 0 being highest)
+-- fow: Form of Way (0=undefined, 1=motorway, 2=multiple carriageway, 3=single carriageway, 4=roundabout, 5=traffic square, 6=sliproad)
+-- flowdir: Flow direction (1=two-way, 2=one-way end to start, 3=one-way start to end)
+-- INSERT INTO local.roads (id, meta, frc, fow, flowdir, from_int, to_int, len, geom) VALUES
+--     (1, 'road_1', 3, 3, 1, 1, 2, 50.5, ST_SetSRID(ST_MakeLine(ST_MakePoint(-0.1276, 51.5074), ST_MakePoint(-0.1280, 51.5078)), 4326)),
+--     (2, 'road_2', 3, 3, 1, 2, 3, 51.2, ST_SetSRID(ST_MakeLine(ST_MakePoint(-0.1280, 51.5078), ST_MakePoint(-0.1284, 51.5082)), 4326));
+
+-- Verify data
+-- SELECT COUNT(*) as intersection_count FROM local.intersections;
+-- SELECT COUNT(*) as road_count FROM local.roads;
