@@ -11,7 +11,7 @@
   "author": "OpenLR contributors",
   "license": "Apache-2.0",
   "dependencies": {
-    "express": "^4.18.2",
+    "express": "^4.22.1",
     "http-proxy-middleware": "^2.0.6"
   },
   "devDependencies": {
