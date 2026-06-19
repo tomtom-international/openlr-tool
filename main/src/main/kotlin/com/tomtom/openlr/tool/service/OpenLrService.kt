@@ -12,9 +12,12 @@ import openlr.encoder.OpenLREncoder
 import openlr.encoder.OpenLREncoderParameter
 import openlr.location.LocationFactory
 import openlr.map.Line
+import openlr.properties.OpenLRPropertiesReader
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Service for OpenLR encoding and decoding operations.
@@ -37,22 +40,31 @@ class OpenLrService(
     private val binaryDecoder = OpenLRBinaryDecoder()
 
     private val encoderParameter: OpenLREncoderParameter
-    private val decoderParameter: OpenLRDecoderParameter
+    private val decoderParameterCache = ConcurrentHashMap<String, OpenLRDecoderParameter>()
 
     init {
-        // Initialize encoder parameter
         encoderParameter = OpenLREncoderParameter.Builder()
             .with(mapDatabase)
             .with(listOf<PhysicalEncoder>(binaryEncoder))
             .buildParameter()
 
-        // Initialize decoder parameter
-        decoderParameter = OpenLRDecoderParameter.Builder()
-            .with(mapDatabase)
-            .with(listOf<PhysicalDecoder>(binaryDecoder))
-            .buildParameter()
-
         logger.info("OpenLR encoder/decoder initialized")
+    }
+
+    private fun getOrLoadDecoderParameter(propSet: String): OpenLRDecoderParameter {
+        return decoderParameterCache.getOrPut(propSet) {
+            val configFile = File("$decoderPropsDir/$propSet.properties")
+            val builder = OpenLRDecoderParameter.Builder()
+                .with(mapDatabase)
+                .with(listOf<PhysicalDecoder>(binaryDecoder))
+            if (configFile.exists()) {
+                builder.with(OpenLRPropertiesReader.loadPropertiesFromFile(configFile))
+                logger.info("Loaded decoder properties: ${configFile.absolutePath}")
+            } else {
+                logger.warn("Properties file not found: ${configFile.absolutePath}, using library defaults")
+            }
+            builder.buildParameter()
+        }
     }
 
     /**
@@ -77,7 +89,7 @@ class OpenLrService(
 
             for (propSet in propertySets) {
                 logger.debug("Attempting decode with property set: $propSet")
-                location = decoder.decode(decoderParameter, locationReference)
+                location = decoder.decode(getOrLoadDecoderParameter(propSet), locationReference)
 
                 if (location.isValid) {
                     successfulPropertySet = propSet
@@ -248,11 +260,11 @@ class OpenLrService(
     }
 
     /**
-     * Reload decoder/encoder properties.
+     * Reload decoder/encoder properties by evicting the parameter cache.
+     * The next decode call for each profile will re-read its .properties file from disk.
      */
     fun reloadProperties() {
-        // Note: In the open-source version, properties are baked into the parameter objects
-        // at initialization time. To truly reload, we'd need to recreate the parameter objects.
-        logger.info("Properties reload requested (not implemented in open-source version)")
+        decoderParameterCache.clear()
+        logger.info("Decoder properties cache cleared; files will be reloaded on next request")
     }
 }
