@@ -4,10 +4,10 @@ import com.tomtom.openlr.tool.model.FlowDirection
 import com.tomtom.openlr.tool.model.Road
 import openlr.map.*
 import org.locationtech.jts.geom.LineString
+import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import java.awt.geom.Point2D
 import java.util.*
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Adapter that bridges MapDatabaseService to OpenLR library's MapDatabase interface.
@@ -17,11 +17,14 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @Component
 class OpenLrMapDatabaseAdapter(
-    val mapDatabaseService: MapDatabaseService
+    val mapDatabaseService: MapDatabaseService,
+    @Value("\${cache_size}") cacheSize: Int
 ) : MapDatabase {
 
-    private val lineCache = ConcurrentHashMap<Long, Line>()
-    private val nodeCache = ConcurrentHashMap<Long, Node>()
+    // Bounded, like the road and intersection caches. A two-way road yields two
+    // lines, so the line cache is given headroom over the configured figure.
+    private val lineCache = LruCache<Long, Line>(cacheSize * 2)
+    private val nodeCache = LruCache<Long, Node>(cacheSize)
 
     override fun findLinesCloseByCoordinate(
         longitude: Double,
@@ -43,17 +46,17 @@ class OpenLrMapDatabaseAdapter(
     }
 
     override fun getLine(id: Long): Line? {
-        return lineCache[id] ?: run {
+        return lineCache.get(id) ?: run {
             val road = mapDatabaseService.getRoad(Math.abs(id)) ?: return null
             val lines = convertRoadToLines(road)
             // Cache all generated lines
-            lines.forEach { lineCache[it.id] = it }
+            lines.forEach { lineCache.put(it.id, it) }
             lines.firstOrNull { it.id == id }
         }
     }
 
     override fun getNode(id: Long): Node? {
-        return nodeCache[id] ?: run {
+        return nodeCache.get(id) ?: run {
             val intersection = mapDatabaseService.getIntersection(id) ?: return null
             val node = NodeAdapter(
                 id = intersection.id,
@@ -61,13 +64,14 @@ class OpenLrMapDatabaseAdapter(
                 latitude = intersection.latitude,
                 mapDatabase = this
             )
-            nodeCache[id] = node
+            nodeCache.put(id, node)
             node
         }
     }
 
     override fun getNumberOfLines(): Int {
-        return mapDatabaseService.getRoadCount()
+        // Lines, not rows: a two-way road is two lines.
+        return mapDatabaseService.getLineCount()
     }
 
     override fun getNumberOfNodes(): Int {
@@ -96,6 +100,11 @@ class OpenLrMapDatabaseAdapter(
         nodeCache.clear()
         mapDatabaseService.clearCaches()
     }
+
+    /** Occupancy and hit rates for every cache in the map layer. */
+    fun cacheStats(): Map<String, LruCache.Stats> =
+        mapOf("lines" to lineCache.stats(), "nodes" to nodeCache.stats()) +
+            mapDatabaseService.cacheStats()
 
     /**
      * Convert a Road to OpenLR Line objects.
@@ -178,33 +187,15 @@ private class LineAdapter(
         return path
     }
 
+    /** Lon/lat pairs for [GeoMath]. */
+    private fun lonLat(): List<Pair<Double, Double>> =
+        geometry.coordinates.map { Pair(it.x, it.y) }
+
     override fun getGeoCoordinateAlongLine(distanceAlong: Int): GeoCoordinates? {
         if (distanceAlong < 0 || distanceAlong > lineLength) return null
-
-        val totalLength = geometry.length
-        val fraction = distanceAlong.toDouble() / road.lengthMeters
-        val targetDistance = fraction * totalLength
-
-        var accumulated = 0.0
-        for (i in 0 until geometry.numPoints - 1) {
-            val p1 = geometry.getCoordinateN(i)
-            val p2 = geometry.getCoordinateN(i + 1)
-            val segmentLength = Math.sqrt(
-                Math.pow(p2.x - p1.x, 2.0) + Math.pow(p2.y - p1.y, 2.0)
-            )
-
-            if (accumulated + segmentLength >= targetDistance) {
-                val segmentFraction = (targetDistance - accumulated) / segmentLength
-                val x = p1.x + (p2.x - p1.x) * segmentFraction
-                val y = p1.y + (p2.y - p1.y) * segmentFraction
-                return GeoCoordinatesImpl(x, y)
-            }
-            accumulated += segmentLength
-        }
-
-        // Return last point if we've gone too far
-        val lastCoord = geometry.getCoordinateN(geometry.numPoints - 1)
-        return GeoCoordinatesImpl(lastCoord.x, lastCoord.y)
+        val point = GeoMath.interpolate(lonLat(), distanceAlong.toDouble(), road.lengthMeters)
+            ?: return null
+        return GeoCoordinatesImpl(point.first, point.second)
     }
 
     override fun getPointAlongLine(distanceAlong: Int): Point2D.Double? {
@@ -212,68 +203,39 @@ private class LineAdapter(
         return Point2D.Double(geoCoord.longitudeDeg, geoCoord.latitudeDeg)
     }
 
+    /**
+     * Perpendicular distance in metres from the point to this line.
+     *
+     * Feeds candidate rating and `MaxNodeDistance`, so it has to be the distance to
+     * the line and not to its nearest vertex: on a 200 m segment with only endpoints,
+     * a point 5 m off the middle used to measure ~100 m away.
+     */
     override fun distanceToPoint(longitude: Double, latitude: Double): Int {
-        val distance = geometry.coordinates.minOfOrNull { coord ->
-            val dx = coord.x - longitude
-            val dy = coord.y - latitude
-            Math.sqrt(dx * dx + dy * dy)
-        } ?: Double.MAX_VALUE
-        return (distance * 111000).toInt() // Rough conversion to meters
+        val coords = lonLat()
+        if (coords.isEmpty()) return Int.MAX_VALUE
+        if (coords.size == 1) {
+            return GeoMath.distanceMetres(longitude, latitude, coords[0].first, coords[0].second)
+                .toInt()
+        }
+        return GeoMath.projectOntoPolyline(coords, longitude, latitude).distanceMetres.toInt()
     }
 
+    /**
+     * Distance in metres from the start of this line to the point on it closest to
+     * the given coordinate.
+     *
+     * Scaled by the map database's own length: `len` is authoritative and
+     * ellipsoidal, so the tangent-plane figures are used only as a ratio.
+     */
     override fun measureAlongLine(longitude: Double, latitude: Double): Int {
-        // Find the closest point on the line and return the distance from start
-        var minDistance = Double.MAX_VALUE
-        var closestSegmentIndex = 0
-        var closestPointOnSegment: org.locationtech.jts.geom.Coordinate? = null
+        val coords = lonLat()
+        if (coords.size < 2) return 0
 
-        for (i in 0 until geometry.numPoints - 1) {
-            val p1 = geometry.getCoordinateN(i)
-            val p2 = geometry.getCoordinateN(i + 1)
+        val metricTotal = GeoMath.cumulativeLengths(coords).last()
+        if (metricTotal <= 0.0) return 0
 
-            // Project point onto line segment
-            val dx = p2.x - p1.x
-            val dy = p2.y - p1.y
-            val t = ((longitude - p1.x) * dx + (latitude - p1.y) * dy) / (dx * dx + dy * dy)
-            val tClamped = Math.max(0.0, Math.min(1.0, t))
-
-            val projX = p1.x + tClamped * dx
-            val projY = p1.y + tClamped * dy
-
-            val distToSegment = Math.sqrt(
-                Math.pow(longitude - projX, 2.0) + Math.pow(latitude - projY, 2.0)
-            )
-
-            if (distToSegment < minDistance) {
-                minDistance = distToSegment
-                closestSegmentIndex = i
-                closestPointOnSegment = org.locationtech.jts.geom.Coordinate(projX, projY)
-            }
-        }
-
-        // Calculate distance along line from start to the closest point
-        var distanceAlong = 0.0
-        for (i in 0 until closestSegmentIndex) {
-            val p1 = geometry.getCoordinateN(i)
-            val p2 = geometry.getCoordinateN(i + 1)
-            distanceAlong += Math.sqrt(
-                Math.pow(p2.x - p1.x, 2.0) + Math.pow(p2.y - p1.y, 2.0)
-            )
-        }
-
-        // Add distance within the closest segment
-        if (closestPointOnSegment != null) {
-            val p1 = geometry.getCoordinateN(closestSegmentIndex)
-            distanceAlong += Math.sqrt(
-                Math.pow(closestPointOnSegment.x - p1.x, 2.0) +
-                Math.pow(closestPointOnSegment.y - p1.y, 2.0)
-            )
-        }
-
-        // Convert geometric distance to meters (rough approximation)
-        val totalLength = geometry.length
-        val fraction = distanceAlong / totalLength
-        return (fraction * road.lengthMeters).toInt()
+        val along = GeoMath.projectOntoPolyline(coords, longitude, latitude).alongMetres
+        return ((along / metricTotal) * road.lengthMeters).toInt()
     }
 
     override fun getNextLines(): Iterator<Line> {
@@ -340,8 +302,12 @@ private class NodeAdapter(
     override fun getGeoCoordinates(): GeoCoordinates = GeoCoordinatesImpl(longitude, latitude)
 
     override fun getConnectedLines(): Iterator<Line> {
-        // This is expensive, so only call when needed
-        throw UnsupportedOperationException("Use getOutgoingLines() or getIncomingLines() instead")
+        // The OpenLR *encoder* calls this, so it cannot throw: doing so failed most
+        // /api/v1/encode requests with "Use getOutgoingLines() or getIncomingLines()
+        // instead". Outgoing plus incoming is the full set of lines touching this
+        // node -- a two-way road contributes one of each, matching
+        // getNumberConnectedLines().
+        return (getOutgoingLines().asSequence() + getIncomingLines().asSequence()).iterator()
     }
 
     override fun getOutgoingLines(): Iterator<Line> {

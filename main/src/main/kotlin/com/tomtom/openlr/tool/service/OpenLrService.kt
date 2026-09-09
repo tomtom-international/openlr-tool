@@ -15,6 +15,7 @@ import openlr.map.Line
 import openlr.properties.OpenLRPropertiesReader
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.dao.DataAccessException
 import org.springframework.stereotype.Service
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -39,16 +40,76 @@ class OpenLrService(
     private val binaryEncoder = OpenLRBinaryEncoder()
     private val binaryDecoder = OpenLRBinaryDecoder()
 
-    private val encoderParameter: OpenLREncoderParameter
     private val decoderParameterCache = ConcurrentHashMap<String, OpenLRDecoderParameter>()
+    private val encoderParameterCache = ConcurrentHashMap<String, OpenLREncoderParameter>()
 
     init {
-        encoderParameter = OpenLREncoderParameter.Builder()
-            .with(mapDatabase)
-            .with(listOf<PhysicalEncoder>(binaryEncoder))
-            .buildParameter()
-
         logger.info("OpenLR encoder/decoder initialized")
+    }
+
+    /**
+     * Profile names are restricted to this character set.
+     *
+     * `props` is interpolated into a file path, so without this a value like
+     * `../application` read a properties file from outside the profile directory.
+     * It also bounds [decoderParameterCache], which is keyed on the name: any
+     * accepted value adds a permanent entry, so arbitrary input could grow the heap.
+     */
+    private val profileNamePattern = Regex("^[A-Za-z0-9_-]{1,64}$")
+
+    /** Profile names that have a `.properties` file in [dir]. */
+    private fun profilesIn(dir: String): List<String> =
+        File(dir).listFiles { f -> f.isFile && f.name.endsWith(".properties") }
+            ?.map { it.name.removeSuffix(".properties") }
+            ?.sorted()
+            ?: emptyList()
+
+    /** Decoder profiles available to `props` on `/decode`. */
+    fun availableProfiles(): List<String> = profilesIn(decoderPropsDir)
+
+    /** Encoder profiles available to `props` on `/encode`. */
+    fun availableEncoderProfiles(): List<String> = profilesIn(encoderPropsDir)
+
+    /**
+     * Validate profile names for either role, or `null` when they are all usable.
+     *
+     * Applies to encoding as well as decoding: `/encode` used to accept `props` and
+     * ignore it outright -- the encoder parameters were built once at startup with no
+     * properties file, so `encoding_properties/` was never read and any value was
+     * silently accepted.
+     */
+    private fun profileError(names: List<String>, role: String, dir: String): String? {
+        val malformed = names.filter { !profileNamePattern.matches(it) }
+        if (malformed.isNotEmpty()) {
+            return "Invalid $role profile name(s): ${malformed.joinToString(", ")}"
+        }
+        val available = profilesIn(dir)
+        val unknown = names.filter { it !in available }
+        if (unknown.isNotEmpty()) {
+            // Previously a missing file fell back to the OpenLR library defaults with
+            // only a warning, and meta.propertySet echoed the bogus name -- a typo
+            // produced a plausible result computed with different parameters.
+            return "Unknown $role profile(s): ${unknown.joinToString(", ")}. " +
+                "Available: ${available.joinToString(", ")}"
+        }
+        return null
+    }
+
+    /** Encoder parameters for [propSet], built on first use and then cached. */
+    private fun getOrLoadEncoderParameter(propSet: String): OpenLREncoderParameter {
+        return encoderParameterCache.getOrPut(propSet) {
+            val configFile = File("$encoderPropsDir/$propSet.properties")
+            val builder = OpenLREncoderParameter.Builder()
+                .with(mapDatabase)
+                .with(listOf<PhysicalEncoder>(binaryEncoder))
+            if (configFile.exists()) {
+                builder.with(OpenLRPropertiesReader.loadPropertiesFromFile(configFile))
+                logger.info("Loaded encoder properties: ${configFile.absolutePath}")
+            } else {
+                logger.warn("Encoder properties not found: ${configFile.absolutePath}")
+            }
+            builder.buildParameter()
+        }
     }
 
     private fun getOrLoadDecoderParameter(propSet: String): OpenLRDecoderParameter {
@@ -76,6 +137,10 @@ class OpenLrService(
         return try {
             // Parse comma-separated property set names
             val propertySets = propertiesName.split(",").map { it.trim() }
+
+            profileError(propertySets, "decoder", decoderPropsDir)?.let {
+                return DecodingFailureResponse(openLrCode, it)
+            }
 
             // Create ByteArray from base64 string
             val byteArray = ByteArray(openLrCode)
@@ -109,6 +174,13 @@ class OpenLrService(
 
             // Build GeoJSON response with the successful property set
             buildGeoJsonResponse(location, openLrCode, successfulPropertySet, System.nanoTime() - startTime)
+        } catch (e: DataAccessException) {
+            // A database problem is not a bad location reference. Rethrow so the
+            // handler can answer 503 -- swallowing it here reported "failed to
+            // decode" with a 400, blaming the caller's code for an outage and
+            // corrupting the front end's diagnostics.
+            logger.error("Database unavailable while decoding", e)
+            throw e
         } catch (e: Exception) {
             logger.error("Error decoding OpenLR code", e)
             DecodingFailureResponse(openLrCode, "Decoding error: ${e.message}")
@@ -169,8 +241,14 @@ class OpenLrService(
             }
         }
 
-        // Build WKT representation
-        val wkt = "LINESTRING(" + allCoordinates.joinToString(", ") { "${it[0]} ${it[1]}" } + ")"
+        // Consecutive segments share an endpoint, so the concatenation repeats points;
+        // drop the duplicates. With no coordinates at all the previous expression
+        // produced "LINESTRING()", which is not valid WKT.
+        val deduplicated = allCoordinates.filterIndexed { index, coordinate ->
+            index == 0 || coordinate != allCoordinates[index - 1]
+        }
+        val wkt = if (deduplicated.isEmpty()) "LINESTRING EMPTY"
+                  else "LINESTRING(" + deduplicated.joinToString(", ") { "${it[0]} ${it[1]}" } + ")"
 
         return FeatureCollection(
             features = features,
@@ -186,24 +264,73 @@ class OpenLrService(
     }
 
     /**
-     * Encode a path (list of line IDs) as an OpenLR location reference.
+     * Encode a path as an OpenLR location reference.
+     *
+     * The path is given as `local.roads.meta` values -- the source-network
+     * references that decoding returns -- so a decoded path can be re-encoded
+     * without translation. `local.roads.id` is an opaque internal key required by
+     * the OpenLR library and is never part of the API.
+     *
+     * A leading `-` reverses traversal of that segment, e.g. `-390249024` travels
+     * the segment against its digitised direction. Only a leading `-` is
+     * significant; hyphens inside a meta value (UUIDs, for instance) are kept.
+     *
+     * Encoding requires `meta` to identify exactly one segment. A value matching
+     * several is rejected rather than resolved arbitrarily -- see the unique index
+     * on `local.roads (meta)`.
      */
     fun encode(
-        lineIds: List<Long>,
+        pathMetas: List<String>,
         positiveOffset: Int = 0,
         negativeOffset: Int = 0,
         propertiesName: String = "default"
     ): EncodeResponse {
         return try {
-            // Fetch lines from database
-            val lines = lineIds.mapNotNull { mapDatabase.getLine(it) }
+            profileError(listOf(propertiesName), "encoder", encoderPropsDir)?.let {
+                return EncodeResponse(success = false, openLrCode = null, error = it)
+            }
 
-            if (lines.size != lineIds.size) {
-                return EncodeResponse(
-                    success = false,
-                    openLrCode = null,
-                    error = "Some line IDs not found in database"
-                )
+            val lines = mutableListOf<Line>()
+            for (element in pathMetas) {
+                val reverse = element.startsWith("-")
+                val meta = if (reverse) element.substring(1) else element
+
+                if (meta.isBlank()) {
+                    return EncodeResponse(
+                        success = false,
+                        openLrCode = null,
+                        error = "Empty path element"
+                    )
+                }
+
+                val matches = mapDatabase.mapDatabaseService.getRoadsByMeta(meta)
+                if (matches.isEmpty()) {
+                    return EncodeResponse(
+                        success = false,
+                        openLrCode = null,
+                        error = "No segment found with meta '$meta'"
+                    )
+                }
+                if (matches.size > 1) {
+                    return EncodeResponse(
+                        success = false,
+                        openLrCode = null,
+                        error = "meta '$meta' matches ${matches.size} segments; " +
+                            "encoding requires it to identify exactly one"
+                    )
+                }
+
+                val road = matches.first()
+                val lineId = if (reverse) -road.id else road.id
+                val line = mapDatabase.getLine(lineId)
+                    ?: return EncodeResponse(
+                        success = false,
+                        openLrCode = null,
+                        error = "Segment '$meta' cannot be traversed " +
+                            (if (reverse) "against" else "with") +
+                            " its digitised direction (flowdir=${road.flowDirection})"
+                    )
+                lines.add(line)
             }
 
             // Create a line location from the lines
@@ -215,7 +342,8 @@ class OpenLrService(
             )
 
             // Encode the location
-            val locationRefHolder = encoder.encodeLocation(encoderParameter, location)
+            val locationRefHolder =
+                encoder.encodeLocation(getOrLoadEncoderParameter(propertiesName), location)
 
             if (!locationRefHolder.isValid) {
                 return EncodeResponse(
@@ -241,6 +369,9 @@ class OpenLrService(
                 success = true,
                 openLrCode = binaryData.base64Data
             )
+        } catch (e: DataAccessException) {
+            logger.error("Database unavailable while encoding", e)
+            throw e
         } catch (e: Exception) {
             logger.error("Error encoding path", e)
             EncodeResponse(
@@ -259,12 +390,17 @@ class OpenLrService(
         logger.info("Caches cleared")
     }
 
+    /** Occupancy and hit rates for every cache in the map layer. */
+    fun cacheStats(): Map<String, LruCache.Stats> = mapDatabase.cacheStats()
+
     /**
      * Reload decoder/encoder properties by evicting the parameter cache.
      * The next decode call for each profile will re-read its .properties file from disk.
      */
     fun reloadProperties() {
         decoderParameterCache.clear()
-        logger.info("Decoder properties cache cleared; files will be reloaded on next request")
+        encoderParameterCache.clear()
+        logger.info("Decoder and encoder properties caches cleared; files will be " +
+            "reloaded on next request")
     }
 }

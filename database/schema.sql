@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS local.roads (
     meta TEXT,
     frc INTEGER,
     fow INTEGER,
-    flowdir INTEGER,
+    flowdir INTEGER NOT NULL CHECK (flowdir IN (1, 2, 3)),
     from_int BIGINT,
     to_int BIGINT,
     len DOUBLE PRECISION,
@@ -38,6 +38,12 @@ CREATE INDEX IF NOT EXISTS local_intersections_meta_idx ON local.intersections U
 CREATE INDEX IF NOT EXISTS local_roads_from_int_idx ON local.roads USING BTREE (from_int);
 CREATE INDEX IF NOT EXISTS local_roads_to_int_idx ON local.roads USING BTREE (to_int);
 CREATE INDEX IF NOT EXISTS local_roads_geom_idx ON local.roads USING GIST (geom);
+
+-- meta is the only segment identifier the API exposes, and /api/v1/encode resolves
+-- its path against it, so it must identify exactly one segment. UNIQUE both enforces
+-- that and provides the lookup index. A map whose meta values repeat will fail to
+-- load here, which is the intended outcome.
+CREATE UNIQUE INDEX IF NOT EXISTS local_roads_meta_idx ON local.roads USING BTREE (meta);
 
 -- Add foreign key constraints (optional - uncomment if needed)
 -- ALTER TABLE local.roads ADD CONSTRAINT roads_from_int_fkey FOREIGN KEY (from_int) REFERENCES local.intersections(id);
