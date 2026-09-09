@@ -1,6 +1,7 @@
 package com.tomtom.openlr.tool.controller
 
 import com.tomtom.openlr.tool.model.*
+import com.tomtom.openlr.tool.service.LruCache
 import com.tomtom.openlr.tool.service.MapDatabaseService
 import com.tomtom.openlr.tool.service.OpenLrService
 import org.slf4j.LoggerFactory
@@ -67,7 +68,10 @@ class OpenLrController(
      * Encode a path as an OpenLR location reference.
      *
      * POST /api/v1/encode
-     * Params: path=123&path=456&path=789&positiveOffset=0&negativeOffset=0&props=default
+     * Params: path=<meta>&path=-<meta>&positiveOffset=0&negativeOffset=0&props=default
+     *
+     * `path` elements are `local.roads.meta` values -- the same references decoding
+     * returns -- with a leading `-` for reverse traversal.
      */
     @PostMapping("/encode")
     fun encode(
@@ -78,21 +82,7 @@ class OpenLrController(
     ): ResponseEntity<EncodeResponse> {
         logger.info("Encoding path with {} segments", path.size)
 
-        // Parse path - each element can be a line ID (positive or negative)
-        val lineIds = try {
-            path.map { it.toLong() }
-        } catch (e: NumberFormatException) {
-            return ResponseEntity(
-                EncodeResponse(
-                    success = false,
-                    openLrCode = null,
-                    error = "Invalid path: all elements must be numeric line IDs"
-                ),
-                HttpStatus.BAD_REQUEST
-            )
-        }
-
-        val response = openLrService.encode(lineIds, positiveOffset, negativeOffset, props)
+        val response = openLrService.encode(path, positiveOffset, negativeOffset, props)
 
         val status = if (response.success) HttpStatus.OK else HttpStatus.BAD_REQUEST
         return ResponseEntity(response, status)
@@ -129,28 +119,58 @@ class OpenLrController(
     }
 
     /**
-     * Get a specific road by ID.
+     * Get a specific road by its internal ID, as GeoJSON.
      *
      * GET /api/v1/roads/123
+     *
+     * The ID is the opaque `local.roads.id`; callers normally identify a segment by
+     * `meta` instead (see [getRoadsByMeta]). Kept as a diagnostic.
      */
     @GetMapping("/roads/{id}")
-    fun getRoad(@PathVariable id: Long): ResponseEntity<Road> {
+    fun getRoad(@PathVariable id: Long): ResponseEntity<Feature> {
         val road = mapDatabaseService.getRoad(id)
             ?: return ResponseEntity.notFound().build()
 
-        return ResponseEntity.ok(road)
+        return ResponseEntity.ok(toFeature(road))
     }
 
     /**
-     * Get roads by metadata value.
+     * Get roads by metadata value, as a GeoJSON FeatureCollection.
      *
      * GET /api/v1/roads?meta=road_12345
      */
     @GetMapping("/roads")
-    fun getRoadsByMeta(@RequestParam meta: String): ResponseEntity<List<Road>> {
+    fun getRoadsByMeta(@RequestParam meta: String): ResponseEntity<FeatureCollection> {
         val roads = mapDatabaseService.getRoadsByMeta(meta)
-        return ResponseEntity.ok(roads)
+        return ResponseEntity.ok(
+            FeatureCollection(
+                features = roads.map { toFeature(it) },
+                meta = RoadQueryMetadata(count = roads.size)
+            )
+        )
     }
+
+    /**
+     * Render a [Road] as a GeoJSON feature.
+     *
+     * The `Road` model carries a JTS `LineString`, which Jackson cannot serialise
+     * usefully -- returning it directly produced 48 KB of nested `envelope` objects
+     * per segment and no coordinates at all.
+     */
+    private fun toFeature(road: Road): Feature = Feature(
+        properties = RoadFeatureProperties(
+            meta = road.meta ?: "",
+            frc = road.frc.name,
+            fow = road.fow.name,
+            flowDirection = road.flowDirection.name,
+            lengthMeters = road.lengthMeters,
+            startNodeId = road.startNodeId,
+            endNodeId = road.endNodeId
+        ),
+        geometry = LineStringFeatureGeometry(
+            coordinates = road.geometry.coordinates.map { listOf(it.x, it.y) }
+        )
+    )
 
     /**
      * Get database statistics.
@@ -176,6 +196,19 @@ class OpenLrController(
         openLrService.clearCaches()
         return ResponseEntity.ok(mapOf("message" to "Caches cleared successfully"))
     }
+
+    /**
+     * Cache occupancy and hit rates.
+     *
+     * GET /api/v1/cache/stats
+     *
+     * The caches were unbounded and there was no way to see how large they had
+     * grown, which is why that went unnoticed. `size` should settle at or below
+     * `maxSize`; a rising `evictions` means the bound is doing its job.
+     */
+    @GetMapping("/cache/stats")
+    fun cacheStats(): ResponseEntity<Map<String, LruCache.Stats>> =
+        ResponseEntity.ok(openLrService.cacheStats())
 
     /**
      * Reload OpenLR properties.

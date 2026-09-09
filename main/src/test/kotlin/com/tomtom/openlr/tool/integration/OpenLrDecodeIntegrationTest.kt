@@ -65,8 +65,8 @@ class OpenLrDecodeIntegrationTest {
                 id = 2043028L,
                 meta = "00004435-3500-0400-0000-000003b24606",
                 frc = 0, // FRC_0
-                fow = 1, // ROUNDABOUT
-                flowdir = 3, // BOTH_WAYS
+                fow = 1, // MOTORWAY
+                flowdir = 3, // one-way, start->end
                 fromInt = 2236769L,
                 toInt = 2232145L,
                 len = 78,
@@ -244,12 +244,10 @@ class OpenLrDecodeIntegrationTest {
             meta = meta,
             frc = FunctionalRoadClass.getFRCs()[frc],
             fow = FormOfWay.getFOWs()[fow],
-            flowDirection = when(flowdir) {
-                0 -> FlowDirection.BOTH_WAYS
-                1 -> FlowDirection.START_TO_END
-                2 -> FlowDirection.END_TO_START
-                else -> FlowDirection.BOTH_WAYS
-            },
+            // Use the production mapping rather than a local copy of it. Test data must
+            // use a defined flowdir; the service's lenient fallback is covered elsewhere.
+            flowDirection = FlowDirection.fromDbValue(flowdir)
+                ?: error("test data has undefined flowdir $flowdir"),
             startNodeId = fromInt,
             endNodeId = toInt,
             lengthMeters = len.toDouble(),

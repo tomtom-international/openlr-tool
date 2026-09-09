@@ -127,6 +127,49 @@ class MapDatabaseServiceTest {
     }
 
     @Test
+    fun `road cache is bounded by cache_size and reports its stats`() {
+        // A service with a deliberately tiny bound: requesting more distinct roads
+        // than the bound must evict rather than grow. Previously cache_size was the
+        // map's initial capacity and nothing limited occupancy.
+        val small = MapDatabaseService(
+            jdbcTemplate = jdbcTemplate,
+            schema = "local",
+            roadsTable = "roads",
+            intersectionsTable = "intersections",
+            cacheSize = 10
+        )
+        every {
+            jdbcTemplate.query(any<String>(), any<RowMapper<Road>>(), any<Long>())
+        } answers {
+            val id = thirdArg<Array<Any>>()[0] as Long
+            listOf(createTestRoad(id))
+        }
+
+        for (id in 1L..200L) assertNotNull(small.getRoad(id))
+
+        val stats = small.cacheStats()["roads"]!!
+        assertEquals(10, stats.maxSize)
+        assertTrue(stats.size <= 10, "cache held ${stats.size} entries")
+        assertTrue(stats.evictions > 0, "nothing was evicted")
+    }
+
+    @Test
+    fun `clearing caches resets occupancy but keeps the bound`() {
+        every {
+            jdbcTemplate.query(any<String>(), any<RowMapper<Road>>(), any<Long>())
+        } answers { listOf(createTestRoad(thirdArg<Array<Any>>()[0] as Long)) }
+
+        mapDatabaseService.getRoad(1L)
+        assertTrue(mapDatabaseService.cacheStats()["roads"]!!.size > 0)
+
+        mapDatabaseService.clearCaches()
+
+        val stats = mapDatabaseService.cacheStats()["roads"]!!
+        assertEquals(0, stats.size)
+        assertTrue(stats.maxSize > 0)
+    }
+
+    @Test
     fun `getIntersection should return intersection when found`() {
         // Given
         val intersectionId = 456L
@@ -249,6 +292,29 @@ class MapDatabaseServiceTest {
         // Then
         assertEquals(0, result)
         verify { jdbcTemplate.queryForObject(any<String>(), eq(Int::class.java)) }
+    }
+
+    @Test
+    fun `getLineCount counts two-way roads twice`() {
+        // A two-way road is two OpenLR lines. getNumberOfLines() used to return the
+        // row count, under-reporting the network by up to half.
+        every {
+            jdbcTemplate.queryForObject(
+                match<String> { it.contains("flowdir = 1") && it.contains("SUM") },
+                Int::class.java
+            )
+        } returns 7_531
+
+        assertEquals(7_531, mapDatabaseService.getLineCount())
+    }
+
+    @Test
+    fun `getLineCount returns zero for an empty table`() {
+        every {
+            jdbcTemplate.queryForObject(match<String> { it.contains("SUM") }, Int::class.java)
+        } returns null
+
+        assertEquals(0, mapDatabaseService.getLineCount())
     }
 
     @Test

@@ -56,7 +56,11 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: generic_pg_mapdb
       SPRING_CONFIG_LOCATION: file:/app/config/application.properties
-      JAVA_OPTS: ${JAVA_OPTS:--Xmx24g}
+      # MaxRAMPercentage, not a fixed -Xmx: a hardcoded -Xmx24g told the JVM it had
+      # 24 GB inside a container limited to far less, so instead of collecting as it
+      # approached the real ceiling it would be OOM-killed. Override JAVA_OPTS to pin
+      # a size where the deployment envelope is known.
+      JAVA_OPTS: ${JAVA_OPTS:--XX:MaxRAMPercentage=75}
     volumes:
       - ../config:/app/config:ro
     networks:
@@ -65,18 +69,14 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      # test: ["CMD", "curl", "-f", "http://localhost:8081/api/v1/purgeCache"]
-      test:
-        [
-          "CMD",
-          "curl",
-          "-f",
-          "-X",
-          "POST",
-          "http://localhost:8081/api/v1/cache/clear",
-        ]
+      # GET /health, NOT cache/clear: probing with the purge endpoint emptied the
+      # line/node/road caches on every interval, so they never survived 30 seconds
+      # and PostgreSQL was re-queried continuously. /health also verifies database
+      # connectivity, which is what webapp's depends_on needs. It costs two
+      # COUNT(*) queries (~0.45s on a 4.7M-road map), hence the raised timeout.
+      test: ["CMD", "curl", "-f", "http://localhost:8081/api/v1/health"]
       interval: 30s
-      timeout: 3s
+      timeout: 10s
       retries: 3
       start_period: 60s
 

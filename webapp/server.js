@@ -6,8 +6,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_URL = process.env.API_URL || 'http://app:8081';
 
-// Serve static files from the public directory
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files from the public directory.
+//
+// `etag` plus `maxAge: 0` makes the browser revalidate on every load and get a 304
+// when nothing changed. That replaces the hand-incremented `app.js?v=N` query
+// parameter, which had to be remembered on every edit and silently served stale
+// JavaScript when it was not.
+app.use(express.static(path.join(__dirname, 'public'), {
+    etag: true,
+    lastModified: true,
+    maxAge: 0,
+    cacheControl: true,
+}));
 
 // Proxy API requests to the Spring Boot backend
 app.use('/api', createProxyMiddleware({

@@ -128,8 +128,11 @@ All formats return a GeoJSON FeatureCollection. The `meta.propertySet` field ind
 
 **Other endpoints:**
 ```bash
-# Purge cache
-curl http://localhost:8081/api/v1/purgeCache
+# Purge the map caches, without restarting the engine
+curl -X POST http://localhost:8081/api/v1/cache/clear
+
+# Cache occupancy, bounds, hit rates and evictions
+curl http://localhost:8081/api/v1/cache/stats
 ```
 
 ## dc Script Reference
@@ -337,7 +340,7 @@ Road segments representing the map network.
 |--------|------|-------------|
 | `id` | bigint | Primary key - unique road segment identifier (positive or negative for direction) |
 | `meta` | text | Optional metadata/UUID for the road segment |
-| `flowdir` | smallint | Flow direction: 0=both, 1=forward, 2=backward |
+| `flowdir` | smallint | Traversability, `1`/`2`/`3` only (enforced by a CHECK constraint): `1`=two-way, `2`=one-way against digitisation (`to_int`→`from_int`), `3`=one-way with digitisation (`from_int`→`to_int`) |
 | `fow` | smallint | Form of way (FRC classification) |
 | `frc` | smallint | Functional road class (0-7, 0=motorway, 7=other) |
 | `geom` | geometry(LineString,4326) | Line geometry in WGS84 (SRID 4326) |
@@ -476,7 +479,7 @@ docker exec openlr-postgres pg_isready -h localhost -U openlr -d openlr_db
 ### Application Health Check
 ```bash
 # Check from host
-curl -f http://localhost:8081/api/v1/purgeCache
+curl -f http://localhost:8081/api/v1/health
 ```
 
 Docker monitors these automatically:
@@ -610,7 +613,7 @@ PORT=8080 JAVA_OPTS="-Xmx32g" ./dc up
 
 # 4. Verify health
 ./dc ps
-curl http://localhost:8080/api/v1/purgeCache
+curl -f http://localhost:8080/api/v1/health
 
 # 5. Monitor logs
 ./dc logs app

@@ -127,7 +127,7 @@ Stores road network links (segments).
 | `meta` | TEXT | External reference or metadata |
 | `frc` | INTEGER | Functional Road Class (0-7, 0 = highest) |
 | `fow` | INTEGER | Form of Way (0-6, see below) |
-| `flowdir` | INTEGER | Flow direction (1 = two-way, 2 = one-way E←S, 3 = one-way S→E) |
+| `flowdir` | INTEGER | Traversability, `1`/`2`/`3` only (CHECK constraint): 1 = two-way, 2 = one-way end→start, 3 = one-way start→end |
 | `from_int` | BIGINT | Start intersection ID (FK to intersections.id) |
 | `to_int` | BIGINT | End intersection ID (FK to intersections.id) |
 | `len` | DOUBLE PRECISION | Length in meters |
@@ -152,6 +152,7 @@ Stores road network links (segments).
 | 4 | Roundabout |
 | 5 | Traffic square |
 | 6 | Sliproad |
+| 7 | Other (service roads, parking areas, pedestrian ways) |
 
 #### Functional Road Class (frc)
 
@@ -165,6 +166,83 @@ Stores road network links (segments).
 | 5 | Fifth class road (FRC 5) |
 | 6 | Sixth class road (FRC 6) |
 | 7 | Other road (FRC 7) |
+
+#### Segment identity (meta)
+
+`meta` is the reference back into your source network, and it is the only segment
+identifier the API exposes — `local.roads.id` is an opaque internal key that the
+OpenLR library requires and that never appears in a response.
+
+`POST /api/v1/encode` resolves its `path` against `meta`, so the column must
+identify exactly one segment:
+
+```sql
+meta TEXT  -- with: CREATE UNIQUE INDEX local_roads_meta_idx ON local.roads (meta)
+```
+
+A value must also avoid a leading `-` (read as a reverse-traversal marker) and
+whitespace (awkward to pass as a query parameter).
+
+**Migrating a database created before this index:** check first, since duplicates
+mean those segments cannot be encoded.
+
+```sql
+SELECT count(*) AS duplicate_meta FROM (
+    SELECT meta FROM local.roads GROUP BY meta HAVING count(*) > 1
+);
+
+SELECT count(*) AS unusable_meta FROM local.roads
+WHERE meta IS NULL OR meta = '' OR meta LIKE '-%' OR meta LIKE '% %';
+```
+
+If both report zero:
+
+```sql
+CREATE UNIQUE INDEX local_roads_meta_idx ON local.roads USING BTREE (meta);
+```
+
+If not, the map needs reloading with a unique `meta` — for Orbis-derived data that
+is `uv run tools/orbis_to_pg_csv.py -m way`, the default.
+
+#### Flow Direction (flowdir)
+
+| Value | Description |
+|-------|-------------|
+| 1 | Two-way |
+| 2 | One-way, end intersection to start intersection (against the digitised direction) |
+| 3 | One-way, start intersection to end intersection (with the digitised direction) |
+
+These are the only permitted values. No other value means "two-way" — the remainder of
+the range is reserved, so that giving a value a meaning in future cannot change how
+already-loaded data is read. `local.roads` enforces this:
+
+```sql
+flowdir INTEGER NOT NULL CHECK (flowdir IN (1, 2, 3))
+```
+
+A one-way segment must be coded `2` or `3`; a segment left as `1` is traversable in
+both directions during decoding.
+
+**Migrating a database created before this constraint:** the schema scripts only run
+when the data directory is first initialised, so an existing database needs the
+constraint added by hand. Check for offending rows first:
+
+```sql
+-- Rows that would violate the constraint
+SELECT flowdir, count(*) FROM local.roads
+WHERE flowdir IS NULL OR flowdir NOT IN (1, 2, 3)
+GROUP BY flowdir;
+```
+
+Anything reported there is currently being read as two-way, with a warning logged per
+road. Recode those rows to `1`, `2` or `3` — which value depends on your source
+network, so this cannot be automated safely — then apply the constraint:
+
+```sql
+ALTER TABLE local.roads
+    ALTER COLUMN flowdir SET NOT NULL,
+    ADD CONSTRAINT roads_flowdir_check CHECK (flowdir IN (1, 2, 3));
+```
 
 ## Loading Data
 
