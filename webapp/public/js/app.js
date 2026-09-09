@@ -35,7 +35,6 @@
         initEventListeners();
         initCollapsibleSections();
         initSidebarResize();
-        loadMapMetadata();
     }
 
     /**
@@ -174,48 +173,6 @@
         setTimeout(() => {
             state.map.invalidateSize();
         }, 300);
-    }
-
-    /**
-     * Load map metadata from the database
-     */
-    async function loadMapMetadata() {
-        try {
-            const response = await fetch('/api/v1/metadata');
-
-            if (response.ok) {
-                const data = await response.json();
-
-                if (data && data.features && data.features.length > 0) {
-                    const metadata = data.features[0].properties;
-                    displayMapMetadata(metadata);
-
-                    // Zoom to data extent if bbox available
-                    if (metadata.bbox) {
-                        const coords = metadata.bbox.coordinates[0];
-                        const bounds = coords.map(coord => [coord[1], coord[0]]);
-                        state.map.fitBounds(bounds, { padding: [50, 50] });
-                    }
-                }
-            }
-        } catch (error) {
-            // Map metadata not available - silently ignore
-        }
-    }
-
-    /**
-     * Display map metadata in the header
-     */
-    function displayMapMetadata(metadata) {
-        document.getElementById('metadata-name').textContent = metadata.name || 'Unknown';
-        document.getElementById('metadata-description').textContent = metadata.description || '';
-
-        if (metadata.load_date) {
-            const date = new Date(metadata.load_date);
-            document.getElementById('metadata-date').textContent = date.toLocaleDateString();
-        }
-
-        document.getElementById('map-metadata').style.display = 'block';
     }
 
     /**
