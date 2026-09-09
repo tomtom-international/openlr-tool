@@ -7,6 +7,7 @@ A Spring Boot application for OpenLR encoding/decoding using PostgreSQL + PostGI
 - **PostgreSQL + PostGIS**: Spatial database backend
 - **Minimal OpenLR Schema**: Two-table design (`local.roads` and `local.intersections`)
 - **Docker Compose Deployment**: Containerized with database setup sidecar
+- **Map Converters**: MultiNet-R and Orbis/OSM networks into the OpenLR schema
 - **Multiple Decode Formats**: JSON POST, form data POST, and GET query parameters
 - **GeoJSON Responses**: GeoJSON FeatureCollection output
 - **Configurable Decoder**: Multiple decoding profiles (default, relaxed, strict)
@@ -37,31 +38,31 @@ The application will be available at `http://localhost:8081`
 
 #### 3. Load Map Data
 
-Create a directory with your data files and a `dbsetup.sh` script:
+Two converters ship in [`tools/`](tools/) and produce the CSVs the loader wants. Both
+are covered in full under [Map conversion](#map-conversion) below.
 
 ```bash
-mkdir ~/my-map-data
-cd ~/my-map-data
+# From a MultiNet-R distribution
+uv run tools/mnr_to_pg_csv.py -i /path/to/mnr-distribution -o ~/my-map-data
 
-# Create setup script
-cat > dbsetup.sh <<'EOF'
-#!/bin/bash
-set -e
+# ...or from an Orbis PBF, via osm_tag_mapper
+uv run tools/orbis_to_pg_csv.py -i roads.csv -o ~/my-map-data
 
-# Load roads from shapefile
-ogr2ogr -f PostgreSQL \
-    PG:"host=postgres port=5432 dbname=openlr_db user=openlr password=openlrpwd" \
-    roads.shp \
-    -nln local.roads \
-    -lco GEOMETRY_NAME=geom \
-    -lco SPATIAL_INDEX=GIST \
-    -t_srs EPSG:4326
-EOF
-
-# Run database setup
-cd /path/to/webtool/docker
-./dc setup ~/my-map-data
+# Then load, from either
+cp tools/dbsetup.sh ~/my-map-data/dbsetup.sh
+cd docker && ./dc setup ~/my-map-data
 ```
+
+For a source neither converter handles, write your own `dbsetup.sh` in the data
+directory; `./dc setup` runs it inside a container that has `psql` and `ogr2ogr`.
+[`tools/dbsetup.sh`](tools/dbsetup.sh) is a working example — it drops the indexes,
+`COPY`s both files, rebuilds them, `ANALYZE`s, and then reports row counts, the
+`flowdir` distribution and any road whose endpoints do not resolve. The schema it
+must populate is in [Database Schema](#database-schema).
+
+**On macOS, `/tmp` is not shared with Docker Desktop.** `./dc setup /tmp/...` mounts
+an empty directory and reports `No /data/dbsetup.sh found`. Put the data somewhere
+under `/Users`.
 
 #### 4. Test the API
 
@@ -535,6 +536,136 @@ For Docker deployment:
 PORT=9000 ./docker/dc up
 ```
 
+## Map conversion
+
+Converting a source network into the two-table schema is the one part of setup that
+depends on where your map comes from. Two converters are supported.
+
+| Source | Converter | Input |
+|--------|-----------|-------|
+| MultiNet-R distribution | [`tools/mnr_to_pg_csv.py`](tools/mnr_to_pg_csv.py) | The distribution directory, containing country tarballs |
+| Orbis / OSM PBF | [`tools/orbis_to_pg_csv.py`](tools/orbis_to_pg_csv.py) | A CSV from [`osm_tag_mapper`](https://github.com/tomtom-international/osm_tag_mapper) |
+
+Both emit `roads.csv` and `intersections.csv` for `local.roads` and
+`local.intersections`, and both are loaded the same way, with
+[`tools/dbsetup.sh`](tools/dbsetup.sh) and `./dc setup`.
+
+### Running the converters
+
+Each is a self-contained [uv](https://docs.astral.sh/uv/) script with its
+dependencies declared inline, so there is nothing to install or activate:
+
+```bash
+uv run tools/mnr_to_pg_csv.py --help
+uv run tools/orbis_to_pg_csv.py --help
+```
+
+The transformations themselves are DuckDB SQL — `mnr_to_pg_csv.sql` and
+`orbis_to_pg_csv.sql`, which sit beside the drivers and are the files to read if you
+want to know exactly what an attribute becomes. They run through the DuckDB Python
+package, so no `duckdb` CLI is needed and the drivers behave the same on macOS,
+Linux and Windows.
+
+`tools/dbsetup.sh` is the exception and is deliberately shell: it executes *inside*
+the Linux `db-setup` container, not on your machine.
+
+### MultiNet-R
+
+```bash
+uv run tools/mnr_to_pg_csv.py -i /path/to/distribution -o ~/mnr-eur
+
+cp tools/dbsetup.sh ~/mnr-eur/dbsetup.sh
+cd docker && ./dc setup ~/mnr-eur
+```
+
+Point it at a whole distribution, not one country: it searches recursively for
+`*.tar.gz` and merges every country it finds into one network. It reads three tables
+from each tarball — `MNR_Netw_Route_Link` for attributes, `MNR_Netw_Geo_Link` for
+geometry and length, `MNR_Junction` for nodes — and skips any archive that does not
+contain all three, reporting it.
+
+Where tarballs sit under a `core/` directory only those are considered, since that is
+where the three tables live and decompressing a content tarball to discover otherwise
+costs minutes. `--all-tars` widens the search.
+
+| Option | Effect |
+|--------|--------|
+| `--include-back-roads` | Keep `BACK_ROAD <> 0`. The default drops destination roads, service roads and driveways — 8.6% of links in the Netherlands |
+| `--drivable-only` | Drop walkways, stairs, pedestrian zones and parking. The default keeps them, mapped to OpenLR FOW 7 (OTHER) |
+| `--all-tars` | Consider every tarball, not only those under `core/` |
+| `--memory-limit` | Cap DuckDB's memory, e.g. `8GB`. Germany peaks near 17 GB unconstrained; with a cap it spills to the work directory instead |
+| `--keep-work` | Leave the extracted tables and the DuckDB database for inspection |
+
+Measured on the six-country EUR sample — **under four minutes** end to end,
+extraction included, for **15,628,506 roads and 13,345,984 intersections**:
+
+| Country | Route links read | Kept | Convert |
+|---------|-----------------:|-----:|--------:|
+| deu | 16,209,628 | 11,652,448 | 124 s |
+| nld | 2,625,345 | 2,400,680 | 19 s |
+| bel | 1,604,194 | 1,467,379 | 13 s |
+| lux | 120,064 | 99,603 | 1 s |
+| and | 7,414 | 6,822 | 0 s |
+| mco | 1,899 | 1,895 | 0 s |
+
+`meta` carries the MN-R `FEAT_ID`, so a decoded path hands you the identifiers your
+source network uses, and `/api/v1/encode` accepts the same values back.
+
+### Orbis / OSM
+
+Conversion is two stages. Deriving OpenLR FRC and FOW from Orbis and OSM tags is a
+substantial body of tested logic that lives in
+**[`osm_tag_mapper`](https://github.com/tomtom-international/osm_tag_mapper)** and is
+not duplicated here:
+
+```bash
+# Stage 1 - tags to OpenLR attributes (separate repository)
+uv run python -m osm_tag_mapper --input nld-orbis.pbf --output /tmp/nld.csv
+
+# Stage 2 - attributes to this repository's schema
+uv run tools/orbis_to_pg_csv.py -i /tmp/nld.csv -o ~/orbis-nld
+
+cp tools/dbsetup.sh ~/orbis-nld/dbsetup.sh
+cd docker && ./dc setup ~/orbis-nld
+```
+
+Stage 1 must be recent enough to emit a `way_id` column; the converter refuses a CSV
+without one rather than falling back to a synthetic key.
+
+`-m, --meta` chooses what `roads.meta` carries. The default `way` — the Orbis way id
+— is the only value guaranteed unique, which the API requires:
+
+| `--meta` | Content | Unique? |
+|----------|---------|---------|
+| `way` (default) | Orbis way id | **Yes** |
+| `gers` | GERS entity reference, falling back to the OSM id | No |
+| `osm` | Original OSM way id | No |
+| `both` | `gers_id\|osm_id` | No |
+
+**Orbis input only.** The converter assumes each row is one junction-to-junction
+link. Orbis satisfies that; a plain OSM or Geofabrik extract does not — about a
+quarter of its highway ways run *through* a junction mid-way, and since
+`osm_tag_mapper` emits one row per way without splitting, those junctions would
+simply be absent. Supporting Geofabrik means adding node-degree splitting upstream
+first.
+
+### Conversion notes
+
+The details that are easy to get wrong, and the reasoning behind each mapping, are in
+[`tools/README.md`](tools/README.md). The architectural decisions — why `meta` is the
+public identifier, why `flowdir` reserves unrecognised values, why the converters are
+DuckDB rather than Python — are recorded in [`docs/adr/`](docs/adr/README.md).
+
+### Verifying a load
+
+```bash
+uv run tools/verify_api.py --sample 500
+```
+
+Exercises what unit tests cannot: decoding a corpus against the real network,
+response shapes, the error contract, cache bounds, and the decode/encode round trip.
+Add `--disruptive` to confirm a database failure answers 503 rather than 400.
+
 ## Database Schema
 
 The application uses a minimal two-table schema in PostgreSQL:
@@ -844,3 +975,7 @@ cat backup.sql | docker exec -i openlr-postgres psql -U openlr -d openlr_db
 - **[docker/README.md](docker/README.md)** - Complete Docker deployment guide
 - **[docker/db-setup/README.md](docker/db-setup/README.md)** - Database setup sidecar documentation
 - **[config/README.md](config/README.md)** - Configuration file documentation
+- **[SPEC.md](SPEC.md)** - What the tool guarantees, as numbered requirements
+- **[tools/README.md](tools/README.md)** - Map converters and the verification harness
+- **[docs/adr/](docs/adr/README.md)** - Architecture decision records
+- **[docs/api/openapi.yml](docs/api/openapi.yml)** - OpenAPI 3.0 specification

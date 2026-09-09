@@ -15,3 +15,4 @@ boundary. Do not write one for an implementation detail a reader can simply read
 | [0003](0003-meta-is-the-public-identifier.md) | `meta` is the public identifier; `id` is opaque |
 | [0004](0004-duckdb-for-map-conversion.md) | Map conversion in DuckDB SQL, not Python |
 | [0005](0005-bounded-map-caches.md) | Map caches are LRU-bounded, not unbounded |
+| [0006](0006-mnr-attribute-mapping.md) | MultiNet-R attribute mapping, and what is assumed |

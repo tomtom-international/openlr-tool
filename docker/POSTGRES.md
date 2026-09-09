@@ -202,7 +202,7 @@ CREATE UNIQUE INDEX local_roads_meta_idx ON local.roads USING BTREE (meta);
 ```
 
 If not, the map needs reloading with a unique `meta` — for Orbis-derived data that
-is `tools/orbis_to_pg_csv.sh -m way`, the default.
+is `uv run tools/orbis_to_pg_csv.py -m way`, the default.
 
 #### Flow Direction (flowdir)
 

@@ -111,7 +111,7 @@ configs/
 ### Container Configuration
 - **Base Image**: Built from `docker/Dockerfile`
 - **JVM Settings**: Tuned for larger datasets and local debugging
-- **Health Checks**: `/api/v1/purgeCache` endpoint monitoring
+- **Health Checks**: `GET /api/v1/health` endpoint monitoring
 - **Volume Mounts**:
   - `maps/` → `/maps:ro` (read-only maps)
   - `configs/{config}/` → `/app/configs/{config}:ro` (config-specific)
@@ -200,10 +200,14 @@ docker logs openlr-orbis
 
 ### Health Checks
 All containers include automatic health monitoring:
-- **Endpoint**: `GET /api/v1/purgeCache`
+- **Endpoint**: `GET /api/v1/health`
 - **Interval**: 30 seconds
 - **Timeout**: 10 seconds
 - **Retries**: 3 attempts
+
+A health check must not change server state. This one previously probed
+`POST /api/v1/cache/clear`, which emptied every map cache on each interval; to purge
+deliberately, call that endpoint yourself (see below).
 
 ## Troubleshooting
 

@@ -61,10 +61,13 @@ parameter profile, and to see exactly what came back and why.
   catalog but is not a dependency of the application and no XML endpoint exists.
 - **Map data ingestion in general.** The tool defines the target schema and ships a
   sidecar with `psql`/`ogr2ogr`; converting an arbitrary source map into that schema
-  is the operator's script. The one exception is Orbis: `tools/` ships a converter
-  from an `osm_tag_mapper` CSV to this schema (see `tools/README.md`). It is
-  deliberately Orbis-only — Orbis ways are already split at junctions, which a plain
-  OSM extract does not guarantee.
+  is the operator's script. Two exceptions ship in `tools/` (see `tools/README.md`):
+  a converter from an `osm_tag_mapper` CSV produced from an **Orbis** PBF, and one
+  from a **MultiNet-R** distribution. The Orbis path is deliberately Orbis-only —
+  Orbis ways are already split at junctions, which a plain OSM extract does not
+  guarantee. The MN-R path walks a distribution for country tarballs and merges them
+  into one network; its attribute mapping and the assumption it carries are recorded
+  in [ADR 0006](docs/adr/0006-mnr-attribute-mapping.md).
 - **Multi-map / multi-tenant serving.** One process serves one network.
 - **Authentication, authorisation, rate limiting, quotas.** None. See NFR-5.
 - **Persistence of decode history.** Every request is stateless; nothing is recorded
@@ -413,6 +416,49 @@ FD-4 around `fromDbValue`. `README.md`, `docker/README.md`, `docker/POSTGRES.md`
 `docker/init-db/02-sample-data.sql.example` all state this convention, and
 `FlowDirectionTest` pins it.
 
+### 7.6 Map conversion
+
+Converting a source network into §7's schema is the one setup step that depends on
+the source. Two converters ship in `tools/`; both emit `roads.csv` and
+`intersections.csv` and are loaded by `tools/dbsetup.sh` through `./dc setup`.
+
+| Source | Converter | Input |
+|--------|-----------|-------|
+| MultiNet-R distribution | `tools/mnr_to_pg_csv.py` + `.sql` | The distribution directory |
+| Orbis / OSM PBF | `tools/orbis_to_pg_csv.py` + `.sql` | A CSV from [`osm_tag_mapper`](https://github.com/tomtom-international/osm_tag_mapper) |
+
+- **CV-1** A converter SHALL emit only rows satisfying every invariant of §7.4 and
+  §7.5, and SHALL verify that before exiting: ids positive and unique, `meta` unique
+  and free of leading `-` or whitespace (DI-5, DI-6), `flowdir` in `{1,2,3}` (FD-2),
+  `frc` and `fow` in `0..7`, `len` positive, every endpoint resolving to an emitted
+  intersection, and geometry carrying `SRID=4326`. A failed check SHALL exit non-zero.
+- **CV-2** Geometry SHALL be written as EWKT with the SRID inline, so `COPY` can load
+  it without a staging table. Plain WKB carries no SRID and is rejected by a
+  `geometry(...,4326)` column, and `COPY` cannot call `ST_SetSRID`.
+- **CV-3** `meta` SHALL carry an identifier meaningful in the source network and
+  unique per segment, since `/encode` resolves against it (FR-2.2). `id` MAY be
+  synthetic. Where it is derived by hashing, the converter SHALL detect two source
+  identifiers colliding on one `id` rather than silently dropping one.
+- **CV-4** Junction identifiers SHALL be deterministic, so that regions converted
+  separately agree on a shared boundary node. MN-R hashes the junction's own
+  `FEAT_ID`; Orbis packs the coordinate, having no junction identity to use.
+- **CV-5** A converter SHALL NOT silently reinterpret an unmapped source value. An
+  enumeration value with no OpenLR equivalent maps to the OpenLR value meaning
+  "other" or "undefined"; a value that cannot be represented at all rejects the row
+  and is counted in the run report.
+- **CV-6** The MN-R converter SHALL accept a distribution directory and merge every
+  country tarball beneath it, skipping and reporting any archive lacking the three
+  required tables. Rows repeated across tarballs — border links and junctions — SHALL
+  be collapsed, not duplicated.
+- **CV-7** Drivers SHALL be cross-platform and self-contained: `uv` scripts with
+  inline dependency declarations, using the DuckDB Python package rather than a CLI
+  and the standard library rather than a `tar` binary. `tools/dbsetup.sh` is exempt,
+  running inside the Linux `db-setup` container.
+
+Attribute mappings are recorded in the `.sql` files and in `tools/README.md`; the
+decisions behind them, including the one assumption the MN-R mapping carries, are in
+`docs/adr/`.
+
 ---
 
 ## 8. Configuration
@@ -636,18 +682,28 @@ constraint enforcing it; `FlowDirection.fromDbValue` holds the one copy of the m
 | FR-3.6 | `MapDatabaseServiceTest` — `getLineCount` counts two-way roads twice |
 | §7.5 WKT shape, openapi accuracy | `tools/verify_api.py` `wkt` and `openapi` checks |
 | FR-3.2, FR-3.3, FR-3.5 | `OpenLrControllerTest`, including a payload-size guard |
+| CV-1 (converter output) | Each converter's own output checks, run on every conversion and gating its exit code |
+| CV-6 | Verified on a six-country MN-R distribution: 15,628,506 roads, 13,345,984 intersections, 321 roads and 1,158 junctions collapsed as cross-tarball duplicates |
 | End-to-end against a loaded map | `tools/verify_api.py` — 20 checks: health, the error contract, response shapes, a decode corpus, profile fallback, the decode/encode round trip, that the health probe mutates nothing, and (with `--disruptive`) the 503 contract under a paused database |
 | FR-7, FR-8, FR-9 | Manual, in-browser. No automated front-end tests exist |
 | NFR-3, NFR-4 | Compose health checks and `depends_on: service_healthy` |
 
 Run unit tests with `./gradlew test` (or `./gradlew :main:test`). Run the live
-harness against a deployment with `python3 tools/verify_api.py` — add `--disruptive`
+harness against a deployment with `uv run tools/verify_api.py` — add `--disruptive`
 to include the database-outage checks, which pause and unpause the container. It runs
 25 checks.
 
-Baseline on the Netherlands Orbis map (4,717,149 roads), 1,000 codes: **95.6%**
-decode with `default`, **96.7%** with `strict,relaxed,default`; 25/25 decoded paths
-re-encode and 84% reproduce identical geometry.
+Baselines, same 2,173-code Netherlands corpus and identical decoder profiles, so the
+figures differ only by target map:
+
+| Target network | `default` | with fallback |
+|----------------|----------:|--------------:|
+| Orbis-derived, NL only, 4,717,149 roads | 94.8% | — |
+| MultiNet-R EUR, 6 countries, 15,628,506 roads | **98.3%** | **99.0%** |
+
+25/25 decoded paths re-encode, 84% reproducing identical geometry. The gap between
+the two maps is the expected one: OpenLR accuracy is highest where the source and
+target maps agree on attribution, and these codes are of TomTom lineage.
 
 Acceptance for a deployment:
 

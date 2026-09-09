@@ -128,8 +128,11 @@ All formats return a GeoJSON FeatureCollection. The `meta.propertySet` field ind
 
 **Other endpoints:**
 ```bash
-# Purge cache
-curl http://localhost:8081/api/v1/purgeCache
+# Purge the map caches, without restarting the engine
+curl -X POST http://localhost:8081/api/v1/cache/clear
+
+# Cache occupancy, bounds, hit rates and evictions
+curl http://localhost:8081/api/v1/cache/stats
 ```
 
 ## dc Script Reference
@@ -476,7 +479,7 @@ docker exec openlr-postgres pg_isready -h localhost -U openlr -d openlr_db
 ### Application Health Check
 ```bash
 # Check from host
-curl -f http://localhost:8081/api/v1/purgeCache
+curl -f http://localhost:8081/api/v1/health
 ```
 
 Docker monitors these automatically:
@@ -610,7 +613,7 @@ PORT=8080 JAVA_OPTS="-Xmx32g" ./dc up
 
 # 4. Verify health
 ./dc ps
-curl http://localhost:8080/api/v1/purgeCache
+curl -f http://localhost:8080/api/v1/health
 
 # 5. Monitor logs
 ./dc logs app
