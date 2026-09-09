@@ -1,4 +1,7 @@
 # Multi-stage Docker build for OpenLR WebTool (PostgreSQL only)
+#
+# Build and runtime JDKs are deliberately the same major version. They used to be
+# 17 and 21 respectively -- harmless given a jvmTarget of 17, but unintentional.
 # Stage 1: Build the application
 FROM gradle:8.5-jdk17 AS builder
 
@@ -15,7 +18,7 @@ COPY main/src ./main/src
 RUN gradle :main:bootJar --no-daemon
 
 # Stage 2: Runtime image
-FROM eclipse-temurin:21-jre-jammy
+FROM eclipse-temurin:17-jre-jammy
 
 WORKDIR /app
 
@@ -31,12 +34,12 @@ COPY --from=builder /build/main/build/libs/*.jar app.jar
 EXPOSE 8081
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=60s \
-  CMD curl -f http://localhost:8081/api/v1/purgeCache || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s \
+  CMD curl -f http://localhost:8081/api/v1/health || exit 1
 
 # Environment variables
 ENV SPRING_PROFILES_ACTIVE=generic_pg_mapdb
-ENV JAVA_OPTS="-Xmx24g"
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75"
 
 # Run the application
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
