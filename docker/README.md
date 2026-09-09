@@ -337,7 +337,7 @@ Road segments representing the map network.
 |--------|------|-------------|
 | `id` | bigint | Primary key - unique road segment identifier (positive or negative for direction) |
 | `meta` | text | Optional metadata/UUID for the road segment |
-| `flowdir` | smallint | Flow direction: 0=both, 1=forward, 2=backward |
+| `flowdir` | smallint | Traversability, `1`/`2`/`3` only (enforced by a CHECK constraint): `1`=two-way, `2`=one-way against digitisation (`to_int`→`from_int`), `3`=one-way with digitisation (`from_int`→`to_int`) |
 | `fow` | smallint | Form of way (FRC classification) |
 | `frc` | smallint | Functional road class (0-7, 0=motorway, 7=other) |
 | `geom` | geometry(LineString,4326) | Line geometry in WGS84 (SRID 4326) |

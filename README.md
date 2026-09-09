@@ -451,7 +451,7 @@ WEBAPP_PORT=3002 docker-compose up -d webapp
 
 **Solutions**:
 1. Verify backend is running: `docker ps | grep openlr-tool`
-2. Check backend health: `curl -f -X POST http://localhost:8081/api/v1/cache/clear`
+2. Check backend health: `curl -f http://localhost:8081/api/v1/health`
 3. Verify proxy configuration in `webapp/server.js`
 4. Check container networking: `docker network inspect openlr_network`
 
@@ -547,7 +547,7 @@ Road segments representing the map network.
 |--------|------|-------------|
 | `id` | bigint | Unique road segment identifier (positive/negative for direction) |
 | `meta` | text | Optional metadata/UUID |
-| `flowdir` | smallint | Flow direction (0=both, 1=forward, 2=backward) |
+| `flowdir` | smallint | Traversability, `1`/`2`/`3` only (enforced by a CHECK constraint): `1`=two-way, `2`=one-way against digitisation (`to_int`→`from_int`), `3`=one-way with digitisation (`from_int`→`to_int`) |
 | `fow` | smallint | Form of way classification |
 | `frc` | smallint | Functional road class (0-7, 0=motorway, 7=other) |
 | `geom` | geometry(LineString,4326) | Line geometry in WGS84 |
@@ -622,7 +622,14 @@ http --ignore-stdin -f http://localhost:8081/api/v1/decode \
   props=strict,relaxed,default
 ```
 
-**Response:** GeoJSON FeatureCollection with decoded road segments. The `meta.propertySet` field indicates which profile succeeded.
+**Response:** GeoJSON FeatureCollection with decoded road segments.
+
+Each feature carries `properties.id` — the signed road ID, negative where the segment is
+traversed against its digitised direction. Collecting those in feature order gives a
+`path` that can be posted straight back to `/api/v1/encode`. `properties.meta` carries
+the reference into the source network (for Orbis-derived maps, see
+[tools/README.md](tools/README.md)). The `meta.propertySet` field indicates which
+decoding profile succeeded.
 
 ### Encode Map Path to OpenLR
 
@@ -632,21 +639,24 @@ Encode a path of road segments as an OpenLR location reference.
 
 ```bash
 curl -X POST http://localhost:8081/api/v1/encode \
-  -d "path=123&path=456&path=-789" \
+  -d "path=390249024&path=459554506&path=-580286743" \
   -d "props=default"
 ```
 
 **Parameters:**
-- `path` (required, multiple): List of road segment IDs. Use positive IDs to traverse in the forward direction, negative IDs to traverse in the reverse direction (e.g., `path=123&path=-456` travels forward on segment 123, then backward on segment 456)
+- `path` (required, multiple): Ordered list of `meta` values — the same segment references `/decode` returns, so a decoded path can be re-encoded directly. Prefix a value with `-` to traverse that segment against its digitised direction (e.g., `path=390249024&path=-459554506` runs forward along the first segment, then backward along the second). Only a *leading* `-` is a direction marker; hyphens inside a value, as in a UUID, belong to the identifier. A value must identify exactly one segment — one matching several is rejected rather than resolved arbitrarily
 - `positiveOffset` (optional, default: 0): Offset in meters from the start of the path
 - `negativeOffset` (optional, default: 0): Offset in meters from the end of the path
-- `props` (optional, default: "default"): Encoding profile
+- `props` (optional, default: "default"): Encoding profile, resolved against `config/encoding_properties/`. An unknown or malformed name is rejected with 400 rather than silently ignored
 
 ### Other Endpoints
 
 ```bash
 # Purge caches
 curl -X POST http://localhost:8081/api/v1/cache/clear
+
+# Cache occupancy, bounds, hit rates and evictions
+curl http://localhost:8081/api/v1/cache/stats
 
 # Reload configuration
 curl -X POST http://localhost:8081/api/v1/properties/reload
@@ -796,14 +806,14 @@ cd docker
 ./dc build
 
 # 2. Start services
-PORT=8080 JAVA_OPTS="-Xmx32g" ./dc up
+PORT=8080 JAVA_OPTS="-XX:MaxRAMPercentage=75" ./dc up
 
 # 3. Load map data
 ./dc setup /path/to/production-data
 
 # 4. Verify health
 ./dc ps
-curl -X POST http://localhost:8080/api/v1/cache/clear
+curl -f http://localhost:8080/api/v1/health
 ```
 
 ### Health Checks
@@ -817,7 +827,7 @@ Both PostgreSQL and the application have health checks:
 
 - **Minimum RAM**: 40GB recommended (PostgreSQL defaults to ~16GB tuning + 24GB JVM heap)
 - **PostgreSQL**: 4GB shared_buffers, 12GB effective_cache_size
-- **Application**: 24GB heap default (configurable via `JAVA_OPTS`)
+- **Application**: heap sized by `-XX:MaxRAMPercentage=75`, so it tracks the container limit. Pin it with `JAVA_OPTS` only where the envelope is known — a fixed `-Xmx` larger than the container gets the process OOM-killed instead of collecting
 
 ### Backup and Recovery
 
