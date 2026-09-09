@@ -151,5 +151,5 @@ FROM (
 )
 GROUP BY id;
 
--- Outputs are written by tools/orbis_to_pg_csv.sh: COPY ... TO requires a
--- literal path, so the wrapper appends the two COPY statements.
+-- Outputs are written by tools/orbis_to_pg_csv.py, which issues the two COPY
+-- statements: COPY ... TO requires a literal path, not a variable.

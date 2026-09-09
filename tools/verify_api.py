@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
 #!/usr/bin/env python3
 """Live API verification harness for a running OpenLR Tool deployment.
 
@@ -5,11 +9,11 @@ Exercises the behaviours that unit tests cannot: real decoding against a real ma
 the response shapes, the error contract, and the decode/encode round trip. Every
 check is independent and reports PASS/FAIL; the exit code is non-zero if any failed.
 
-    tools/verify_api.py                                  # all non-disruptive checks
-    tools/verify_api.py --codes /path/to/codes.openlrs   # supply a decode corpus
-    tools/verify_api.py --sample 500
-    tools/verify_api.py --disruptive                     # also pauses the database
-    tools/verify_api.py --only decode,roundtrip
+    uv run tools/verify_api.py                                  # all non-disruptive checks
+    uv run tools/verify_api.py --codes /path/to/codes.openlrs   # supply a decode corpus
+    uv run tools/verify_api.py --sample 500
+    uv run tools/verify_api.py --disruptive                     # also pauses the database
+    uv run tools/verify_api.py --only decode,roundtrip
 
 Requires only the standard library and, for --disruptive, the docker CLI.
 """
@@ -19,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from datetime import datetime, timezone
 import sys
 import time
 import urllib.error
@@ -328,14 +333,48 @@ def check_cache_bounds(api):
 
 
 def check_cache_not_purged_by_probe(api):
-    """The container health check must not mutate state."""
-    out = subprocess.run(["docker", "logs", "openlr-tool"], capture_output=True, text=True)
-    if out.returncode != 0:
-        record("health probe does not purge caches", False, "docker logs unavailable")
+    """The container health check must not mutate state.
+
+    Probing with POST /api/v1/cache/clear emptied every cache on each interval.
+    Checked against the container's configured health check rather than by counting
+    "Clearing caches" log lines: an operator legitimately purges after loading a new
+    network, and a log count cannot tell that apart from a probe doing it.
+    """
+    probe = subprocess.run(
+        ["docker", "inspect", "--format", "{{json .Config.Healthcheck}}", "openlr-tool"],
+        capture_output=True, text=True)
+    if probe.returncode != 0:
+        record("health probe does not mutate state", False,
+               "docker inspect unavailable")
         return
-    purges = out.stdout.count("Clearing caches") + out.stderr.count("Clearing caches")
-    record("health probe does not purge caches", purges == 0,
-           "%d 'Clearing caches' entries since start" % purges)
+
+    configured = probe.stdout.strip()
+    mutating = [path for path in ("cache/clear", "properties/reload", "purgeCache")
+                if path in configured]
+    record("health probe does not mutate state", not mutating,
+           ("probes " + ", ".join(mutating)) if mutating
+           else "probes a read-only endpoint")
+
+    # Corroborate from the logs: purges should not track the probe interval.
+    logs = subprocess.run(["docker", "logs", "openlr-tool"],
+                          capture_output=True, text=True)
+    if logs.returncode != 0:
+        return
+    purges = logs.stdout.count("Clearing caches") + logs.stderr.count("Clearing caches")
+    started = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.StartedAt}}", "openlr-tool"],
+        capture_output=True, text=True).stdout.strip()
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(started.replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        return
+    # A 30s probe interval would give roughly age/30 purges; anything near that
+    # means something automated is doing it. A few are an operator's business.
+    expected_if_probing = max(age / 30.0, 1.0)
+    record("purges are not happening at probe frequency",
+           purges < 0.5 * expected_if_probing,
+           "%d purge(s) in %.0f min uptime" % (purges, age / 60.0))
 
 
 # ---------------------------------------------------------------------------- main

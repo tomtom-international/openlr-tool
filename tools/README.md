@@ -1,17 +1,31 @@
 # Map conversion tools
 
-Turns an **Orbis**-derived road network into CSVs for this repo's
-`local.roads` / `local.intersections` schema.
+Turns a road network into CSVs for this repo's `local.roads` /
+`local.intersections` schema.
 
 | File | Role |
 |------|------|
-| `orbis_to_pg_csv.sql` + `orbis_to_pg_csv.sh` | The converter. DuckDB |
-| `dbsetup-orbis.sh` | Loads the CSVs via `./dc setup` |
+| `orbis_to_pg_csv.py` + `.sql` | Orbis / OSM PBF, via `osm_tag_mapper` |
+| `mnr_to_pg_csv.py` + `.sql` | MultiNet-R distribution |
 | `verify_api.py` | Live verification harness for a running deployment |
+| `dbsetup.sh` | Loads either converter's CSVs via `./dc setup` |
 
-Requires the `duckdb` CLI and nothing else. A Python implementation existed while
-the SQL was being validated against it; the two were confirmed byte-identical on
-4.7M rows and the Python copy has since been removed, DuckDB being 26x faster.
+## Running them
+
+Every script is a self-contained [uv](https://docs.astral.sh/uv/) script: the
+dependency declaration is inline, so `uv run` fetches what it needs on first use
+and there is nothing to install or activate.
+
+```sh
+uv run tools/orbis_to_pg_csv.py --help
+uv run tools/mnr_to_pg_csv.py --help
+uv run tools/verify_api.py --help
+```
+
+The transformations are DuckDB SQL, executed through the DuckDB Python package, so
+no `duckdb` CLI is required and the drivers work the same on macOS, Linux and
+Windows. `dbsetup.sh` is the exception and is deliberately shell: it runs
+*inside* the Linux `db-setup` container, not on your machine.
 
 ## Orbis input only
 
@@ -34,10 +48,10 @@ that is Orbis-specific.
 uv run python -m osm_tag_mapper --input nld-orbis.pbf --output /tmp/nld.csv
 
 # Stage 2 - attributes to this repo's schema
-tools/orbis_to_pg_csv.sh -i /tmp/nld.csv -o ~/orbis-nld
+uv run tools/orbis_to_pg_csv.py -i /tmp/nld.csv -o ~/orbis-nld
 
 # Load
-cp tools/dbsetup-orbis.sh ~/orbis-nld/dbsetup.sh
+cp tools/dbsetup.sh ~/orbis-nld/dbsetup.sh
 cd docker && ./dc setup ~/orbis-nld
 ```
 
@@ -56,10 +70,6 @@ reports row counts, the `flowdir` distribution, and any road whose endpoints do
 not resolve to an intersection.
 
 ### Validating a change to the SQL
-
-```sh
-PYTHON=/path/to/venv/bin/python tools/crosscheck.sh /tmp/nld.csv 60000
-```
 
 The Python implementation exists for exactly this. It is independent — shapely
 and pyproj rather than DuckDB spatial — so agreement is real evidence. Both were
@@ -139,11 +149,11 @@ response shapes, the error contract, and the decode/encode round trip. Standard
 library only.
 
 ```sh
-python3 tools/verify_api.py                        # all non-disruptive checks
-python3 tools/verify_api.py --sample 1000          # larger decode corpus
-python3 tools/verify_api.py --codes codes.openlrs  # your own corpus
-python3 tools/verify_api.py --only decode,roads    # a subset
-python3 tools/verify_api.py --disruptive           # also pauses the database
+uv run tools/verify_api.py                        # all non-disruptive checks
+uv run tools/verify_api.py --sample 1000          # larger decode corpus
+uv run tools/verify_api.py --codes codes.openlrs  # your own corpus
+uv run tools/verify_api.py --only decode,roads    # a subset
+uv run tools/verify_api.py --disruptive           # also pauses the database
 ```
 
 Each check prints PASS/FAIL and the exit code is non-zero if any failed, so it works

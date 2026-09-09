@@ -1,13 +1,17 @@
 #!/bin/bash
-# Load Orbis-derived CSVs into local.roads / local.intersections.
+# Load converter output into local.roads / local.intersections.
+#
+# Source-agnostic: it wants a roads.csv and an intersections.csv in its own
+# directory, which is what either converter produces. Deliberately shell, because
+# it runs inside the Linux db-setup container rather than on your machine.
 #
 # Usage:
-#   1. Generate the CSVs:
-#        python tools/orbis_to_pg_csv.py -i nzl.csv -o ~/orbis-nl
+#   1. Generate the CSVs with either converter, e.g.
+#        uv run tools/mnr_to_pg_csv.py -i <distribution> -o ~/mnr-eur
 #   2. Copy this script alongside them as dbsetup.sh:
-#        cp tools/dbsetup-orbis.sh ~/orbis-nl/dbsetup.sh
+#        cp tools/dbsetup.sh ~/mnr-eur/dbsetup.sh
 #   3. Load:
-#        cd docker && ./dc setup ~/orbis-nl
+#        cd docker && ./dc setup ~/mnr-eur
 #
 # PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD are set by the db-setup container.
 
